@@ -720,6 +720,35 @@ def send_bundle_item_deleted_alert(bundle_name, item_id):
         pass
 
 
+def get_mm2_product_ids():
+    """Get set of MM2 product IDs from collection"""
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return set()
+
+    headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN}
+    mm2_product_ids = set()
+
+    try:
+        # Find MM2 collection
+        coll_url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/custom_collections.json"
+        coll_resp = requests.get(coll_url, headers=headers, timeout=30)
+        if coll_resp.status_code == 200:
+            for coll in coll_resp.json().get('custom_collections', []):
+                if 'mm2' in coll.get('handle', '').lower() or 'murder' in coll.get('title', '').lower():
+                    mm2_collection_id = coll['id']
+                    # Get products in collection
+                    collect_url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/collects.json?collection_id={mm2_collection_id}&limit=250"
+                    collect_resp = requests.get(collect_url, headers=headers, timeout=30)
+                    if collect_resp.status_code == 200:
+                        for collect in collect_resp.json().get('collects', []):
+                            mm2_product_ids.add(collect['product_id'])
+                    break
+    except:
+        pass
+
+    return mm2_product_ids
+
+
 def detect_new_bundles():
     """Detect new bundle/set products that need configuration"""
     if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
@@ -729,6 +758,12 @@ def detect_new_bundles():
     pending = load_json(PENDING_BUNDLES_FILE)
 
     try:
+        # Get MM2 product IDs first
+        mm2_product_ids = get_mm2_product_ids()
+        if not mm2_product_ids:
+            log("No MM2 collection found for bundle detection")
+            return
+
         url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250"
         headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN}
         resp = requests.get(url, headers=headers, timeout=60)
@@ -736,6 +771,9 @@ def detect_new_bundles():
             return
 
         all_products = resp.json().get('products', [])
+
+        # Filter to MM2 products only
+        all_products = [p for p in all_products if p['id'] in mm2_product_ids]
 
         for product in all_products:
             product_id = str(product['id'])
