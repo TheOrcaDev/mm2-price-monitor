@@ -24,7 +24,6 @@ DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")  # Channel to send to
 DISCORD_PUBLIC_KEY = os.getenv("DISCORD_PUBLIC_KEY")  # For signature verification
 ROLE_ID = os.getenv("DISCORD_ROLE_ID", "1468305257757933853")
 ALLOWED_ROLE_IDS = os.getenv("ALLOWED_ROLE_IDS", "").split(",")  # Roles that can approve/decline
-MIN_PRICE = float(os.getenv("MIN_PRICE", "0.50"))  # Minimum price to set
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE")
 SHOPIFY_TOKEN = os.getenv("SHOPIFY_TOKEN")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
@@ -416,13 +415,6 @@ def handle_approve(approval_id, interaction_data):
         return jsonify({
             "type": 4,
             "data": {"content": "This approval has expired or was already handled.", "flags": 64}
-        })
-
-    # Check minimum price
-    if pending['new_price'] < MIN_PRICE:
-        return jsonify({
-            "type": 4,
-            "data": {"content": f"Price ${pending['new_price']:.2f} is below minimum (${MIN_PRICE:.2f}). Declined.", "flags": 64}
         })
 
     # Update Shopify price
