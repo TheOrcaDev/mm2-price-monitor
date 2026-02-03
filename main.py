@@ -35,6 +35,7 @@ PRICE_FILE = "starpets_prices.json"
 SNOOZED_FILE = "snoozed_items.json"
 PENDING_FILE = "pending_approvals.json"
 ACTION_LOG_FILE = "actions.log"
+STOCK_FILE = "stock_status.json"
 
 app = Flask(__name__)
 
@@ -209,6 +210,90 @@ def update_shopify_price(variant_id, new_price):
     except Exception as e:
         log(f"Shopify update error: {e}")
         return False
+
+
+def check_stock():
+    """Check Shopify inventory and notify when items go out of stock"""
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return
+
+    log("Checking stock levels...")
+    previous_stock = load_json(STOCK_FILE)
+    current_stock = {}
+    out_of_stock = []
+
+    try:
+        # Get all products with inventory
+        url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250&fields=id,title,variants"
+        headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN}
+
+        resp = requests.get(url, headers=headers, timeout=60)
+        if resp.status_code != 200:
+            log(f"Shopify stock check error: {resp.status_code}")
+            return
+
+        products = resp.json().get('products', [])
+
+        for product in products:
+            title = product['title']
+            for variant in product.get('variants', []):
+                inventory = variant.get('inventory_quantity', 0)
+                variant_id = variant['id']
+                key = str(variant_id)
+
+                current_stock[key] = {
+                    'title': title,
+                    'inventory': inventory
+                }
+
+                # Check if went from in-stock to out-of-stock
+                prev = previous_stock.get(key, {})
+                was_in_stock = prev.get('inventory', 1) > 0
+                now_out_of_stock = inventory <= 0
+
+                if was_in_stock and now_out_of_stock:
+                    out_of_stock.append(title)
+
+        # Save current stock
+        save_json(STOCK_FILE, current_stock)
+
+        # Send notifications for out of stock items
+        if out_of_stock and DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID:
+            for item in out_of_stock[:10]:  # Limit to 10 to avoid spam
+                send_stock_alert(item)
+                time.sleep(1)
+
+        log(f"Stock check done. {len(out_of_stock)} items went out of stock.")
+
+    except Exception as e:
+        log(f"Stock check error: {e}")
+
+
+def send_stock_alert(item_name):
+    """Send Discord notification for out of stock item"""
+    if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
+        return
+
+    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+
+    item_name_url = item_name.lower().replace(' ', '-').replace("'", '')
+    buyblox_url = f"https://buyblox.gg/products/{item_name_url}"
+
+    payload = {
+        "embeds": [{
+            "title": f"Out of Stock: {item_name}",
+            "color": 0xFEE75C,  # Yellow
+            "description": f"[View on BuyBlox]({buyblox_url})",
+            "footer": {"text": "Stock Alert"}
+        }]
+    }
+
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=10)
+        log(f"Sent stock alert for {item_name}")
+    except Exception as e:
+        log(f"Failed to send stock alert: {e}")
 
 
 # ============ DISCORD ============
@@ -617,6 +702,7 @@ def price_checker_loop():
     while True:
         try:
             check_prices()
+            check_stock()
         except Exception as e:
             log(f"Error in price check: {e}")
         time.sleep(CHECK_INTERVAL)
