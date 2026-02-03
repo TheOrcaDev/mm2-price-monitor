@@ -201,16 +201,20 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id):
     new_price = round(sp_price * (1 - UNDERCUT_PERCENT), 2)
     price_diff = bb_data['price'] - sp_price
 
+    # Build product URLs
+    item_name_url = bb_data['name'].lower().replace(' ', '-').replace("'", '')
+    buyblox_url = f"https://buyblox.gg/products/{item_name_url}"
+    starpets_url = "https://starpets.gg/mm2"
+
     embed = {
-        "title": f"Price Change: {bb_data['name']}",
-        "color": 0xFF6B6B if price_diff > 0 else 0x4ECB71,  # Red if SP cheaper, green if BB cheaper
+        "title": bb_data['name'],
+        "color": 0x5865F2,
         "fields": [
-            {"name": "BuyBlox Price", "value": f"**${bb_data['price']:.2f}**", "inline": True},
-            {"name": "StarPets Price", "value": f"**${sp_price:.2f}**", "inline": True},
-            {"name": "Difference", "value": f"${abs(price_diff):.2f}", "inline": True},
-            {"name": "New Price if Approved", "value": f"**${new_price:.2f}**", "inline": False},
-        ],
-        "footer": {"text": f"ID: {approval_id}"}
+            {"name": "BuyBlox", "value": f"${bb_data['price']:.2f}", "inline": True},
+            {"name": "StarPets", "value": f"${sp_price:.2f}", "inline": True},
+            {"name": "New Price", "value": f"${new_price:.2f}", "inline": True},
+            {"name": "Links", "value": f"[BuyBlox]({buyblox_url}) | [StarPets]({starpets_url})", "inline": False},
+        ]
     }
 
     if bb_data.get('image'):
@@ -353,6 +357,10 @@ def discord_interactions():
 def handle_approve(approval_id, interaction_data):
     """Handle approve button click"""
     pending = get_pending(approval_id)
+    user = interaction_data.get('member', {}).get('user', {})
+    username = user.get('username', 'Unknown')
+    message_id = interaction_data.get('message', {}).get('id')
+    channel_id = interaction_data.get('channel_id')
 
     if not pending:
         return jsonify({
@@ -367,22 +375,36 @@ def handle_approve(approval_id, interaction_data):
         remove_pending(approval_id)
         log(f"APPROVED: {pending['name']} -> ${pending['new_price']:.2f}")
 
-        # Update the message
-        return jsonify({
-            "type": 7,  # UPDATE_MESSAGE
-            "data": {
-                "content": "",
+        # Delete original message
+        if message_id and channel_id and DISCORD_BOT_TOKEN:
+            try:
+                delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+                headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+                requests.delete(delete_url, headers=headers, timeout=10)
+            except Exception as e:
+                log(f"Failed to delete message: {e}")
+
+        # Send new confirmation message (no ping)
+        if DISCORD_BOT_TOKEN and channel_id:
+            url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+            headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+            payload = {
                 "embeds": [{
                     "title": f"Price Updated: {pending['name']}",
-                    "color": 0x4ECB71,
+                    "color": 0x57F287,
                     "fields": [
                         {"name": "Old Price", "value": f"${pending['old_price']:.2f}", "inline": True},
-                        {"name": "New Price", "value": f"**${pending['new_price']:.2f}**", "inline": True},
-                    ]
-                }],
-                "components": []  # Remove buttons
+                        {"name": "New Price", "value": f"${pending['new_price']:.2f}", "inline": True},
+                    ],
+                    "footer": {"text": f"Approved by {username}"}
+                }]
             }
-        })
+            try:
+                requests.post(url, headers=headers, json=payload, timeout=10)
+            except Exception as e:
+                log(f"Failed to send confirmation: {e}")
+
+        return jsonify({"type": 6})  # DEFERRED_UPDATE_MESSAGE (acknowledge)
     else:
         return jsonify({
             "type": 4,
@@ -393,6 +415,10 @@ def handle_approve(approval_id, interaction_data):
 def handle_decline(approval_id, interaction_data):
     """Handle decline button click"""
     pending = get_pending(approval_id)
+    user = interaction_data.get('member', {}).get('user', {})
+    username = user.get('username', 'Unknown')
+    message_id = interaction_data.get('message', {}).get('id')
+    channel_id = interaction_data.get('channel_id')
 
     if not pending:
         return jsonify({
@@ -405,18 +431,33 @@ def handle_decline(approval_id, interaction_data):
     remove_pending(approval_id)
     log(f"DECLINED: {pending['name']} - snoozed 24h")
 
-    return jsonify({
-        "type": 7,  # UPDATE_MESSAGE
-        "data": {
-            "content": "",
+    # Delete original message
+    if message_id and channel_id and DISCORD_BOT_TOKEN:
+        try:
+            delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+            headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+            requests.delete(delete_url, headers=headers, timeout=10)
+        except Exception as e:
+            log(f"Failed to delete message: {e}")
+
+    # Send new confirmation message (no ping)
+    if DISCORD_BOT_TOKEN and channel_id:
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+        payload = {
             "embeds": [{
                 "title": f"Declined: {pending['name']}",
-                "color": 0xFF6B6B,
-                "description": "Snoozed"
-            }],
-            "components": []  # Remove buttons
+                "color": 0xED4245,
+                "description": "Snoozed for 24 hours",
+                "footer": {"text": f"Declined by {username}"}
+            }]
         }
-    })
+        try:
+            requests.post(url, headers=headers, json=payload, timeout=10)
+        except Exception as e:
+            log(f"Failed to send confirmation: {e}")
+
+    return jsonify({"type": 6})  # DEFERRED_UPDATE_MESSAGE (acknowledge)
 
 
 # ============ PRICE CHECKER ============
@@ -448,6 +489,12 @@ def check_prices():
 
         # Check if StarPets is cheaper (we should lower our price)
         if sp_price < bb_price - 0.01:
+            # Skip if price difference is too big (likely wrong match)
+            price_diff_percent = (bb_price - sp_price) / bb_price
+            if price_diff_percent > 0.70:
+                log(f"Skipping {bb_data['name']}: {price_diff_percent*100:.0f}% diff (likely wrong match)")
+                continue
+
             new_price = round(sp_price * (1 - UNDERCUT_PERCENT), 2)
 
             # Only notify if this is a significant change or new
@@ -520,10 +567,7 @@ def discord_gateway():
                     },
                     "presence": {
                         "status": "online",
-                        "activities": [{
-                            "name": "MM2 Prices",
-                            "type": 3  # Watching
-                        }]
+                        "activities": []
                     }
                 }
             }
