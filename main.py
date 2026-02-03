@@ -200,16 +200,15 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id):
     chroma_tag = " [CHROMA]" if item_data.get('is_chroma') else ""
 
     embed = {
-        "title": f"💰 Price Change: {bb_data['name']}{chroma_tag}",
+        "title": f"Price Change: {bb_data['name']}{chroma_tag}",
         "color": 0xFF6B6B if price_diff > 0 else 0x4ECB71,  # Red if SP cheaper, green if BB cheaper
         "fields": [
-            {"name": "📦 BuyBlox Price", "value": f"**${bb_data['price']:.2f}**", "inline": True},
-            {"name": "⭐ StarPets Price", "value": f"**${sp_price:.2f}**", "inline": True},
-            {"name": "📊 Difference", "value": f"${abs(price_diff):.2f} {'(SP cheaper)' if price_diff > 0 else '(BB cheaper)'}", "inline": True},
-            {"name": "✅ New Price if Approved", "value": f"**${new_price:.2f}** ({UNDERCUT_PERCENT*100:.0f}% under SP)", "inline": False},
+            {"name": "BuyBlox Price", "value": f"**${bb_data['price']:.2f}**", "inline": True},
+            {"name": "StarPets Price", "value": f"**${sp_price:.2f}**", "inline": True},
+            {"name": "Difference", "value": f"${abs(price_diff):.2f}", "inline": True},
+            {"name": "New Price if Approved", "value": f"**${new_price:.2f}** ({UNDERCUT_PERCENT*100:.0f}% under SP)", "inline": False},
         ],
-        "footer": {"text": f"ID: {approval_id}"},
-        "timestamp": datetime.utcnow().isoformat()
+        "footer": {"text": f"ID: {approval_id}"}
     }
 
     if bb_data.get('image'):
@@ -222,13 +221,13 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id):
             {
                 "type": 2,  # Button
                 "style": 3,  # Green
-                "label": "✅ APPROVE",
+                "label": "APPROVE",
                 "custom_id": f"approve_{approval_id}"
             },
             {
                 "type": 2,  # Button
                 "style": 4,  # Red
-                "label": "❌ DECLINE (24h)",
+                "label": "DECLINE (24h)",
                 "custom_id": f"decline_{approval_id}"
             }
         ]
@@ -307,7 +306,7 @@ def handle_approve(approval_id, interaction_data):
     if not pending:
         return jsonify({
             "type": 4,
-            "data": {"content": "❌ This approval has expired or was already handled.", "flags": 64}
+            "data": {"content": "This approval has expired or was already handled.", "flags": 64}
         })
 
     # Update Shopify price
@@ -321,9 +320,9 @@ def handle_approve(approval_id, interaction_data):
         return jsonify({
             "type": 7,  # UPDATE_MESSAGE
             "data": {
-                "content": f"✅ **APPROVED** by <@{interaction_data.get('member', {}).get('user', {}).get('id', 'unknown')}>",
+                "content": f"**APPROVED** by <@{interaction_data.get('member', {}).get('user', {}).get('id', 'unknown')}>",
                 "embeds": [{
-                    "title": f"✅ Price Updated: {pending['name']}",
+                    "title": f"Price Updated: {pending['name']}",
                     "color": 0x4ECB71,
                     "fields": [
                         {"name": "Old Price", "value": f"${pending['old_price']:.2f}", "inline": True},
@@ -336,7 +335,7 @@ def handle_approve(approval_id, interaction_data):
     else:
         return jsonify({
             "type": 4,
-            "data": {"content": "❌ Failed to update price. Check Shopify API.", "flags": 64}
+            "data": {"content": "Failed to update price. Check Shopify API.", "flags": 64}
         })
 
 
@@ -347,7 +346,7 @@ def handle_decline(approval_id, interaction_data):
     if not pending:
         return jsonify({
             "type": 4,
-            "data": {"content": "❌ This approval has expired or was already handled.", "flags": 64}
+            "data": {"content": "This approval has expired or was already handled.", "flags": 64}
         })
 
     # Snooze item for 24 hours
@@ -358,9 +357,9 @@ def handle_decline(approval_id, interaction_data):
     return jsonify({
         "type": 7,  # UPDATE_MESSAGE
         "data": {
-            "content": f"❌ **DECLINED** by <@{interaction_data.get('member', {}).get('user', {}).get('id', 'unknown')}> - Snoozed for 24 hours",
+            "content": f"**DECLINED** by <@{interaction_data.get('member', {}).get('user', {}).get('id', 'unknown')}> - Snoozed for 24 hours",
             "embeds": [{
-                "title": f"❌ Declined: {pending['name']}",
+                "title": f"Declined: {pending['name']}",
                 "color": 0xFF6B6B,
                 "description": "This item won't be suggested again for 24 hours."
             }],
