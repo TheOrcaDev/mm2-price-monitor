@@ -1492,10 +1492,11 @@ def check_prices():
 
         # Check if StarPets is cheaper (we should lower our price)
         if sp_price < bb_price - 0.01:
-            # Skip if price difference is too big (likely wrong match)
+            # Skip if price difference is too big AND significant $ amount (likely wrong match)
             price_diff_percent = (bb_price - sp_price) / bb_price
-            if price_diff_percent > 0.70:
-                log(f"Skipping {bb_data['name']}: {price_diff_percent*100:.0f}% diff (likely wrong match)")
+            price_diff_abs = bb_price - sp_price
+            if price_diff_percent > 0.70 and price_diff_abs > 1.00:
+                log(f"Skipping {bb_data['name']}: {price_diff_percent*100:.0f}% diff, ${price_diff_abs:.2f} (likely wrong match)")
                 continue
 
             new_price = round(sp_price * (1 - UNDERCUT_PERCENT), 2)
@@ -1526,10 +1527,11 @@ def check_prices():
 
         # Check if StarPets is 20%+ higher (we can raise our price)
         elif sp_price > bb_price * 1.20:
-            # Skip if price difference is too big (likely wrong match)
+            # Skip if price difference is too big AND significant $ amount (likely wrong match)
             price_diff_percent = (sp_price - bb_price) / bb_price
-            if price_diff_percent > 1.0:  # More than 100% higher is suspicious
-                log(f"Skipping {bb_data['name']}: {price_diff_percent*100:.0f}% higher (likely wrong match)")
+            price_diff_abs = sp_price - bb_price
+            if price_diff_percent > 1.0 and price_diff_abs > 1.00:  # More than 100% higher AND >$1
+                log(f"Skipping {bb_data['name']}: {price_diff_percent*100:.0f}% higher, ${price_diff_abs:.2f} (likely wrong match)")
                 continue
 
             new_price = round(sp_price * (1 - UNDERCUT_PERCENT), 2)
