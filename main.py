@@ -391,21 +391,14 @@ def check_stock():
                     'inventory': inventory
                 }
 
-                # Check if out of stock
+                # Check if out of stock and state changed
                 now_out_of_stock = inventory <= 0
+                prev = previous_stock.get(key, {})
+                was_in_stock = prev.get('inventory', 0) > 0  # Default to 0 (out of stock) if unknown
 
-                # If first run (no previous data), notify about all out of stock
-                # Otherwise, only notify if changed from in-stock to out-of-stock
-                if now_out_of_stock and not is_stock_snoozed(variant_id):
-                    if not previous_stock:
-                        # First run - notify all out of stock
-                        out_of_stock.append({'title': title, 'variant_id': variant_id})
-                    else:
-                        # Check if state changed
-                        prev = previous_stock.get(key, {})
-                        was_in_stock = prev.get('inventory', 1) > 0
-                        if was_in_stock:
-                            out_of_stock.append({'title': title, 'variant_id': variant_id})
+                # Only notify if changed from in-stock to out-of-stock
+                if now_out_of_stock and was_in_stock and not is_stock_snoozed(variant_id):
+                    out_of_stock.append({'title': title, 'variant_id': variant_id})
 
         # Save current stock
         save_json(STOCK_FILE, current_stock)
@@ -925,10 +918,15 @@ def list_bundles():
 
 @app.route('/resetstock')
 def reset_stock():
-    """Clear stock data to trigger fresh out-of-stock notifications"""
-    save_json(STOCK_FILE, {})
+    """Clear snoozed stock and mark all as in-stock to trigger fresh notifications"""
+    # Get current stock and mark everything as in-stock (inventory=1)
+    # So next check will detect out-of-stock items as changed
+    current = load_json(STOCK_FILE)
+    for key in current:
+        current[key]['inventory'] = 1  # Mark as in-stock
+    save_json(STOCK_FILE, current)
     save_json(SNOOZED_STOCK_FILE, {})
-    log("Reset: Cleared stock data and snoozed stock items")
+    log("Reset: Marked all as in-stock, cleared snoozed - will notify out-of-stock on next check")
     return jsonify({"status": "reset", "message": "Will send fresh stock notifications on next check"})
 
 
@@ -1354,6 +1352,12 @@ def check_prices():
     current_bb = get_buyblox_prices()
 
     log(f"StarPets: {len(current_sp)} | BuyBlox: {len(current_bb)}")
+
+    # First run - just save prices without notifications
+    if not saved_prices:
+        log("First run - saving prices without notifications")
+        save_json(PRICE_FILE, current_sp)
+        return
 
     changes_found = 0
 
