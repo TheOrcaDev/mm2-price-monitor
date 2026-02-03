@@ -23,6 +23,7 @@ DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")  # For buttons to work
 DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")  # Channel for price alerts
 DISCORD_STOCK_CHANNEL_ID = os.getenv("DISCORD_STOCK_CHANNEL_ID")  # Channel for stock alerts
+DISCORD_STOCK_ROLE_ID = os.getenv("DISCORD_STOCK_ROLE_ID", "1468341515393957984")  # Role to ping for stock alerts
 DISCORD_PUBLIC_KEY = os.getenv("DISCORD_PUBLIC_KEY")  # For signature verification
 ROLE_ID = os.getenv("DISCORD_ROLE_ID", "1468305257757933853")
 ALLOWED_ROLE_IDS = os.getenv("ALLOWED_ROLE_IDS", "").split(",")  # Roles that can approve/decline
@@ -44,6 +45,7 @@ ACTION_LOG_FILE = "actions.log"
 STOCK_FILE = "stock_status.json"
 BUNDLES_FILE = "bundles.json"  # Confirmed bundle compositions
 PENDING_BUNDLES_FILE = "pending_bundles.json"  # Awaiting bundle confirmation
+SNOOZED_STOCK_FILE = "snoozed_stock.json"  # Snoozed out-of-stock items
 
 app = Flask(__name__)
 
@@ -163,6 +165,28 @@ def snooze_item(item_key, hours=24):
     snoozed = load_json(SNOOZED_FILE)
     snoozed[item_key] = (datetime.now() + timedelta(hours=hours)).isoformat()
     save_json(SNOOZED_FILE, snoozed)
+
+
+# ============ SNOOZED STOCK ITEMS ============
+
+def is_stock_snoozed(variant_id):
+    """Check if stock item is snoozed"""
+    snoozed = load_json(SNOOZED_STOCK_FILE)
+    key = str(variant_id)
+    if key in snoozed:
+        snooze_until = datetime.fromisoformat(snoozed[key])
+        if datetime.now() < snooze_until:
+            return True
+        del snoozed[key]
+        save_json(SNOOZED_STOCK_FILE, snoozed)
+    return False
+
+
+def snooze_stock_item(variant_id, hours=24):
+    """Snooze stock item for X hours"""
+    snoozed = load_json(SNOOZED_STOCK_FILE)
+    snoozed[str(variant_id)] = (datetime.now() + timedelta(hours=hours)).isoformat()
+    save_json(SNOOZED_STOCK_FILE, snoozed)
 
 
 # ============ PENDING APPROVALS ============
@@ -308,21 +332,42 @@ def check_stock():
     out_of_stock = []
 
     try:
-        # Get all products with inventory
-        url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250&fields=id,title,variants,vendor,product_type,tags"
+        # Get all products with pagination
         headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN}
+        all_products = []
+        page_info = None
 
-        resp = requests.get(url, headers=headers, timeout=60)
-        if resp.status_code != 200:
-            log(f"Shopify stock check error: {resp.status_code}")
-            return
+        while True:
+            if page_info:
+                url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250&page_info={page_info}"
+            else:
+                url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250&fields=id,title,variants,vendor,product_type,tags"
 
-        products = resp.json().get('products', [])
+            resp = requests.get(url, headers=headers, timeout=60)
+            if resp.status_code != 200:
+                log(f"Shopify stock check error: {resp.status_code}")
+                return
+
+            products = resp.json().get('products', [])
+            all_products.extend(products)
+
+            # Check for next page
+            link_header = resp.headers.get('Link', '')
+            if 'rel="next"' in link_header:
+                # Extract page_info from Link header
+                import re
+                match = re.search(r'page_info=([^>]+)>; rel="next"', link_header)
+                if match:
+                    page_info = match.group(1)
+                else:
+                    break
+            else:
+                break
 
         # Filter to MM2 products only
         mm2_keywords = ['murder mystery 2', 'mm2', 'murder-mystery-2']
         mm2_products = []
-        for p in products:
+        for p in all_products:
             vendor = (p.get('vendor') or '').lower()
             product_type = (p.get('product_type') or '').lower()
             tags = (p.get('tags') or '').lower()
@@ -346,21 +391,29 @@ def check_stock():
                     'inventory': inventory
                 }
 
-                # Check if went from in-stock to out-of-stock
-                prev = previous_stock.get(key, {})
-                was_in_stock = prev.get('inventory', 1) > 0
+                # Check if out of stock
                 now_out_of_stock = inventory <= 0
 
-                if was_in_stock and now_out_of_stock:
-                    out_of_stock.append(title)
+                # If first run (no previous data), notify about all out of stock
+                # Otherwise, only notify if changed from in-stock to out-of-stock
+                if now_out_of_stock and not is_stock_snoozed(variant_id):
+                    if not previous_stock:
+                        # First run - notify all out of stock
+                        out_of_stock.append({'title': title, 'variant_id': variant_id})
+                    else:
+                        # Check if state changed
+                        prev = previous_stock.get(key, {})
+                        was_in_stock = prev.get('inventory', 1) > 0
+                        if was_in_stock:
+                            out_of_stock.append({'title': title, 'variant_id': variant_id})
 
         # Save current stock
         save_json(STOCK_FILE, current_stock)
 
         # Send notifications for out of stock items
-        if out_of_stock and DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID:
+        if out_of_stock and DISCORD_BOT_TOKEN:
             for item in out_of_stock[:10]:  # Limit to 10 to avoid spam
-                send_stock_alert(item)
+                send_stock_alert(item['title'], item['variant_id'])
                 time.sleep(1)
 
         log(f"Stock check done. {len(out_of_stock)} items went out of stock.")
@@ -695,7 +748,7 @@ def detect_new_bundles():
         log(f"Bundle detection error: {e}")
 
 
-def send_stock_alert(item_name):
+def send_stock_alert(item_name, variant_id):
     """Send Discord notification for out of stock item"""
     channel = DISCORD_STOCK_CHANNEL_ID or DISCORD_CHANNEL_ID
     if not DISCORD_BOT_TOKEN or not channel:
@@ -707,11 +760,23 @@ def send_stock_alert(item_name):
     item_name_url = item_name.lower().replace(' ', '-').replace("'", '')
     buyblox_url = f"https://buyblox.gg/products/{item_name_url}"
 
+    snooze_id = f"stock_snooze_{variant_id}"
+
     payload = {
+        "content": f"<@&{DISCORD_STOCK_ROLE_ID}>" if DISCORD_STOCK_ROLE_ID else "",
         "embeds": [{
             "title": f"Out of Stock: {item_name}",
             "color": 0xFEE75C,  # Yellow
             "description": f"[View on BuyBlox]({buyblox_url})"
+        }],
+        "components": [{
+            "type": 1,
+            "components": [{
+                "type": 2,
+                "style": 2,  # Gray
+                "label": "SNOOZE 24h",
+                "custom_id": snooze_id
+            }]
         }]
     }
 
@@ -858,6 +923,15 @@ def list_bundles():
     return jsonify(bundles)
 
 
+@app.route('/resetstock')
+def reset_stock():
+    """Clear stock data to trigger fresh out-of-stock notifications"""
+    save_json(STOCK_FILE, {})
+    save_json(SNOOZED_STOCK_FILE, {})
+    log("Reset: Cleared stock data and snoozed stock items")
+    return jsonify({"status": "reset", "message": "Will send fresh stock notifications on next check"})
+
+
 def verify_signature(req):
     """Verify Discord request signature"""
     signature = req.headers.get('X-Signature-Ed25519')
@@ -942,6 +1016,10 @@ def discord_interactions():
         elif custom_id.startswith('bundle_ignore_'):
             approval_id = custom_id.replace('bundle_ignore_', '')
             return handle_bundle_ignore(approval_id, data)
+
+        elif custom_id.startswith('stock_snooze_'):
+            variant_id = custom_id.replace('stock_snooze_', '')
+            return handle_stock_snooze(variant_id, data)
 
     return jsonify({"type": 4, "data": {"content": "Unknown interaction"}})
 
@@ -1095,6 +1173,29 @@ def handle_bundle_ignore(approval_id, interaction_data):
         remove_pending(approval_id)
 
     # Just delete the message
+    if message_id and channel_id and DISCORD_BOT_TOKEN:
+        try:
+            delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+            headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+            requests.delete(delete_url, headers=headers, timeout=10)
+        except:
+            pass
+
+    return jsonify({"type": 6})
+
+
+def handle_stock_snooze(variant_id, interaction_data):
+    """Snooze stock alert for 24 hours"""
+    user = interaction_data.get('member', {}).get('user', {})
+    username = user.get('username', 'Unknown')
+    message_id = interaction_data.get('message', {}).get('id')
+    channel_id = interaction_data.get('channel_id')
+
+    # Snooze the item
+    snooze_stock_item(variant_id, hours=24)
+    log(f"Stock snoozed: {variant_id} by {username}")
+
+    # Delete the message
     if message_id and channel_id and DISCORD_BOT_TOKEN:
         try:
             delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
