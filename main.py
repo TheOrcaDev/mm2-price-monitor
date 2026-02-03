@@ -948,8 +948,9 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id, change_type
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=10)
             if resp.status_code in [200, 201]:
+                msg_id = resp.json().get('id')
                 log(f"Sent approval request for {bb_data['name']}")
-                return True
+                return msg_id
             else:
                 log(f"Discord error: {resp.status_code} - {resp.text}")
         except Exception as e:
@@ -969,7 +970,7 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id, change_type
         except:
             pass
 
-    return False
+    return None
 
 
 # ============ FLASK ENDPOINTS ============
@@ -1505,7 +1506,10 @@ def check_prices():
 
                 approval_id = f"{int(time.time())}_{hash(key) % 10000}"
 
-                # Save pending approval
+                # Send Discord notification (red - lower price)
+                message_id = send_approval_request(sp_data, bb_data, sp_price, approval_id, "lower")
+
+                # Save pending approval with message ID
                 add_pending(approval_id, {
                     'item_key': key,
                     'name': bb_data['name'],
@@ -1514,16 +1518,14 @@ def check_prices():
                     'new_price': new_price,
                     'sp_price': sp_price,
                     'is_chroma': sp_data.get('is_chroma', False),
-                    'channel_id': DISCORD_CHANNEL_ID
+                    'channel_id': DISCORD_CHANNEL_ID,
+                    'message_id': message_id
                 })
-
-                # Send Discord notification (red - lower price)
-                send_approval_request(sp_data, bb_data, sp_price, approval_id, "lower")
                 changes_found += 1
                 time.sleep(1)  # Rate limit - 1 message per second
 
-        # Check if StarPets is 15%+ higher (we can raise our price)
-        elif sp_price > bb_price * 1.15:
+        # Check if StarPets is 20%+ higher (we can raise our price)
+        elif sp_price > bb_price * 1.20:
             # Skip if price difference is too big (likely wrong match)
             price_diff_percent = (sp_price - bb_price) / bb_price
             if price_diff_percent > 1.0:  # More than 100% higher is suspicious
@@ -1538,7 +1540,10 @@ def check_prices():
 
                 approval_id = f"{int(time.time())}_{hash(key) % 10000}"
 
-                # Save pending approval
+                # Send Discord notification (green - raise price)
+                message_id = send_approval_request(sp_data, bb_data, sp_price, approval_id, "higher")
+
+                # Save pending approval with message ID
                 add_pending(approval_id, {
                     'item_key': key,
                     'name': bb_data['name'],
@@ -1547,11 +1552,9 @@ def check_prices():
                     'new_price': new_price,
                     'sp_price': sp_price,
                     'is_chroma': sp_data.get('is_chroma', False),
-                    'channel_id': DISCORD_CHANNEL_ID
+                    'channel_id': DISCORD_CHANNEL_ID,
+                    'message_id': message_id
                 })
-
-                # Send Discord notification (green - raise price)
-                send_approval_request(sp_data, bb_data, sp_price, approval_id, "higher")
                 changes_found += 1
                 time.sleep(1)  # Rate limit - 1 message per second
 
@@ -1585,8 +1588,8 @@ def stock_checker_loop():
 
 # ============ DISCORD GATEWAY (for online status) ============
 
-def approve_all_in_channel(channel_id, user_id):
-    """Approve all pending items in a channel"""
+def approve_all_in_channel(channel_id, user_id, username):
+    """Approve all pending items in a channel - process each individually"""
     pending = load_json(PENDING_FILE)
     approved = 0
 
@@ -1595,8 +1598,24 @@ def approve_all_in_channel(channel_id, user_id):
             # Update Shopify price
             success = update_shopify_price(data['variant_id'], data['new_price'])
             if success:
-                log_action("APPROVE", data['name'], f"user:{user_id}", data['old_price'], data['new_price'])
+                log_action("APPROVE", data['name'], username, data['old_price'], data['new_price'])
+
+                # Delete original message
+                msg_id = data.get('message_id')
+                if msg_id and DISCORD_BOT_TOKEN:
+                    try:
+                        delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{msg_id}"
+                        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+                        requests.delete(delete_url, headers=headers, timeout=10)
+                    except:
+                        pass
+
+                # Send confirmation
+                send_individual_confirmation(channel_id, "Price Updated", data['name'],
+                    data['old_price'], data['new_price'], username, 0x57F287)
+
                 approved += 1
+                time.sleep(0.5)  # Rate limit
 
     # Clear all pending for this channel
     pending = {k: v for k, v in pending.items() if v.get('channel_id') != channel_id}
@@ -1605,22 +1624,86 @@ def approve_all_in_channel(channel_id, user_id):
     return approved
 
 
-def decline_all_in_channel(channel_id, user_id):
-    """Decline all pending items in a channel"""
+def decline_all_in_channel(channel_id, user_id, username):
+    """Decline all pending items in a channel - process each individually"""
     pending = load_json(PENDING_FILE)
     declined = 0
 
     for approval_id, data in list(pending.items()):
         if data.get('channel_id') == channel_id:
             snooze_item(data['item_key'], hours=24)
-            log_action("DECLINE", data['name'], f"user:{user_id}")
+            log_action("DECLINE", data['name'], username)
+
+            # Delete original message
+            msg_id = data.get('message_id')
+            if msg_id and DISCORD_BOT_TOKEN:
+                try:
+                    delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{msg_id}"
+                    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+                    requests.delete(delete_url, headers=headers, timeout=10)
+                except:
+                    pass
+
+            # Send confirmation
+            send_decline_confirmation(channel_id, data['name'], username)
+
             declined += 1
+            time.sleep(0.5)  # Rate limit
 
     # Clear all pending for this channel
     pending = {k: v for k, v in pending.items() if v.get('channel_id') != channel_id}
     save_json(PENDING_FILE, pending)
 
     return declined
+
+
+def send_individual_confirmation(channel_id, title, item_name, old_price, new_price, username, color):
+    """Send individual confirmation for bulk action"""
+    if not DISCORD_BOT_TOKEN:
+        return
+
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+
+    payload = {
+        "embeds": [{
+            "title": f"{title}: {item_name}",
+            "color": color,
+            "fields": [
+                {"name": "Old Price", "value": f"${old_price:.2f}", "inline": True},
+                {"name": "New Price", "value": f"${new_price:.2f}", "inline": True},
+            ],
+            "footer": {"text": f"Approved by {username}"}
+        }]
+    }
+
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except:
+        pass
+
+
+def send_decline_confirmation(channel_id, item_name, username):
+    """Send decline confirmation for bulk action"""
+    if not DISCORD_BOT_TOKEN:
+        return
+
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+
+    payload = {
+        "embeds": [{
+            "title": f"Declined: {item_name}",
+            "color": 0xED4245,
+            "description": "Snoozed for 24 hours",
+            "footer": {"text": f"Declined by {username}"}
+        }]
+    }
+
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except:
+        pass
 
 
 def send_bulk_confirmation(channel_id, action, count, user_id):
@@ -1773,14 +1856,14 @@ def discord_gateway():
                 return
 
             if content == '$approveall':
-                count = approve_all_in_channel(channel_id, author_id)
-                send_bulk_confirmation(channel_id, "approved", count, author_id)
-                log(f"$approveall: {count} items approved by {author_id} in {channel_id}")
+                username = msg_data.get('author', {}).get('username', 'Unknown')
+                count = approve_all_in_channel(channel_id, author_id, username)
+                log(f"$approveall: {count} items approved by {username} in {channel_id}")
 
             elif content == '$declineall':
-                count = decline_all_in_channel(channel_id, author_id)
-                send_bulk_confirmation(channel_id, "declined", count, author_id)
-                log(f"$declineall: {count} items declined by {author_id} in {channel_id}")
+                username = msg_data.get('author', {}).get('username', 'Unknown')
+                count = decline_all_in_channel(channel_id, author_id, username)
+                log(f"$declineall: {count} items declined by {username} in {channel_id}")
 
             elif content == '$reset':
                 save_json(PENDING_FILE, {})
