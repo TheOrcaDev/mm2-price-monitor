@@ -227,7 +227,7 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id):
             {
                 "type": 2,  # Button
                 "style": 4,  # Red
-                "label": "DECLINE (24h)",
+                "label": "DECLINE",
                 "custom_id": f"decline_{approval_id}"
             }
         ]
@@ -357,11 +357,11 @@ def handle_decline(approval_id, interaction_data):
     return jsonify({
         "type": 7,  # UPDATE_MESSAGE
         "data": {
-            "content": f"**DECLINED** by <@{interaction_data.get('member', {}).get('user', {}).get('id', 'unknown')}> - Snoozed for 24 hours",
+            "content": f"**DECLINED** by <@{interaction_data.get('member', {}).get('user', {}).get('id', 'unknown')}>",
             "embeds": [{
                 "title": f"Declined: {pending['name']}",
                 "color": 0xFF6B6B,
-                "description": "This item won't be suggested again for 24 hours."
+                "description": "Snoozed"
             }],
             "components": []  # Remove buttons
         }
