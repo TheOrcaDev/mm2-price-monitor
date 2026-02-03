@@ -10,12 +10,14 @@ import os
 import json
 import time
 import threading
+import re
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import requests
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
 import websocket
+import redis
 
 # Environment Variables
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
@@ -25,6 +27,8 @@ DISCORD_STOCK_CHANNEL_ID = os.getenv("DISCORD_STOCK_CHANNEL_ID")  # Channel for 
 DISCORD_PUBLIC_KEY = os.getenv("DISCORD_PUBLIC_KEY")  # For signature verification
 ROLE_ID = os.getenv("DISCORD_ROLE_ID", "1468305257757933853")
 ALLOWED_ROLE_IDS = os.getenv("ALLOWED_ROLE_IDS", "").split(",")  # Roles that can approve/decline
+UPSTASH_REDIS_URL = os.getenv("UPSTASH_REDIS_URL")  # Redis for persistence
+DISCORD_BUNDLE_CHANNEL_ID = os.getenv("DISCORD_BUNDLE_CHANNEL_ID", "1468338873754194004")  # Channel for bundle approvals
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE")
 SHOPIFY_TOKEN = os.getenv("SHOPIFY_TOKEN")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
@@ -37,8 +41,21 @@ SNOOZED_FILE = "snoozed_items.json"
 PENDING_FILE = "pending_approvals.json"
 ACTION_LOG_FILE = "actions.log"
 STOCK_FILE = "stock_status.json"
+BUNDLES_FILE = "bundles.json"  # Confirmed bundle compositions
+PENDING_BUNDLES_FILE = "pending_bundles.json"  # Awaiting bundle confirmation
 
 app = Flask(__name__)
+
+# Redis connection
+redis_client = None
+if UPSTASH_REDIS_URL:
+    try:
+        redis_client = redis.from_url(UPSTASH_REDIS_URL)
+        redis_client.ping()
+        print("Redis connected")
+    except Exception as e:
+        print(f"Redis connection failed: {e}")
+        redis_client = None
 
 
 def log(msg):
@@ -66,6 +83,15 @@ def log_action(action, item_name, username, old_price=None, new_price=None):
 def load_json(filename, default=None):
     if default is None:
         default = {}
+    # Try Redis first
+    if redis_client:
+        try:
+            data = redis_client.get(f"mm2:{filename}")
+            if data:
+                return json.loads(data)
+        except:
+            pass
+    # Fallback to file
     if os.path.exists(filename):
         try:
             with open(filename, 'r') as f:
@@ -76,6 +102,13 @@ def load_json(filename, default=None):
 
 
 def save_json(filename, data):
+    # Save to Redis if available
+    if redis_client:
+        try:
+            redis_client.set(f"mm2:{filename}", json.dumps(data))
+        except:
+            pass
+    # Also save to file as backup
     with open(filename, 'w') as f:
         json.dump(data, f)
 
@@ -294,6 +327,332 @@ def check_stock():
         log(f"Stock check error: {e}")
 
 
+# ============ BUNDLE SYSTEM ============
+
+def is_bundle_product(title):
+    """Check if product is a bundle/set"""
+    title_lower = title.lower()
+    return 'set' in title_lower or 'bundle' in title_lower
+
+
+def extract_items_from_description(description):
+    """Try to extract item names from bundle description"""
+    if not description:
+        return []
+
+    # Clean HTML tags
+    clean_desc = re.sub(r'<[^>]+>', ' ', description)
+    clean_desc = clean_desc.lower()
+
+    # Common patterns: "includes: item1, item2" or "contains item1 and item2"
+    # Or just item names listed
+    items = []
+
+    # Split by common delimiters
+    parts = re.split(r'[,\n•\-\|]', clean_desc)
+    for part in parts:
+        part = part.strip()
+        # Filter out common non-item words
+        if part and len(part) > 2 and len(part) < 50:
+            if not any(skip in part for skip in ['include', 'contain', 'feature', 'this set', 'this bundle', 'product', 'item']):
+                items.append(part)
+
+    return items[:10]  # Limit to 10 items max
+
+
+def match_items_to_products(item_names, all_products):
+    """Match extracted item names to actual products"""
+    matched = []
+    for item_name in item_names:
+        item_lower = item_name.lower().strip()
+        for product in all_products:
+            product_title = product['title'].lower()
+            # Check if item name matches product title
+            if item_lower in product_title or product_title in item_lower:
+                matched.append({
+                    'product_id': product['id'],
+                    'variant_id': product['variants'][0]['id'],
+                    'title': product['title'],
+                    'price': float(product['variants'][0]['price'])
+                })
+                break
+    return matched
+
+
+def get_bundle(bundle_product_id):
+    """Get confirmed bundle composition"""
+    bundles = load_json(BUNDLES_FILE)
+    return bundles.get(str(bundle_product_id))
+
+
+def save_bundle(bundle_product_id, name, item_ids):
+    """Save confirmed bundle composition"""
+    bundles = load_json(BUNDLES_FILE)
+    bundles[str(bundle_product_id)] = {
+        'name': name,
+        'item_ids': item_ids  # List of variant IDs
+    }
+    save_json(BUNDLES_FILE, bundles)
+
+
+def add_pending_bundle(approval_id, data):
+    """Add pending bundle confirmation"""
+    pending = load_json(PENDING_BUNDLES_FILE)
+    pending[approval_id] = data
+    save_json(PENDING_BUNDLES_FILE, pending)
+
+
+def get_pending_bundle(approval_id):
+    """Get pending bundle confirmation"""
+    pending = load_json(PENDING_BUNDLES_FILE)
+    return pending.get(approval_id)
+
+
+def remove_pending_bundle(approval_id):
+    """Remove pending bundle confirmation"""
+    pending = load_json(PENDING_BUNDLES_FILE)
+    if approval_id in pending:
+        del pending[approval_id]
+        save_json(PENDING_BUNDLES_FILE, pending)
+
+
+def calculate_bundle_price(item_variant_ids, all_products):
+    """Calculate sum of individual item prices"""
+    total = 0
+    for variant_id in item_variant_ids:
+        for product in all_products:
+            for variant in product.get('variants', []):
+                if str(variant['id']) == str(variant_id):
+                    total += float(variant['price'])
+                    break
+    return round(total, 2)
+
+
+def send_bundle_confirmation_request(bundle_product, detected_items, approval_id):
+    """Send Discord message asking to confirm bundle contents"""
+    if not DISCORD_BOT_TOKEN or not DISCORD_BUNDLE_CHANNEL_ID:
+        return False
+
+    url = f"https://discord.com/api/v10/channels/{DISCORD_BUNDLE_CHANNEL_ID}/messages"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+
+    items_text = "\n".join([f"- {item['title']} (${item['price']:.2f})" for item in detected_items]) if detected_items else "Could not detect items"
+    total_price = sum(item['price'] for item in detected_items) if detected_items else 0
+
+    embed = {
+        "title": f"Bundle Detected: {bundle_product['title']}",
+        "color": 0x5865F2,
+        "fields": [
+            {"name": "Bundle Price", "value": f"${float(bundle_product['variants'][0]['price']):.2f}", "inline": True},
+            {"name": "Items Total", "value": f"${total_price:.2f}", "inline": True},
+            {"name": "Detected Items", "value": items_text or "None detected", "inline": False},
+        ],
+        "footer": {"text": "APPROVE if correct, DECLINE to enter items manually"}
+    }
+
+    components = [{
+        "type": 1,
+        "components": [
+            {"type": 2, "style": 3, "label": "APPROVE", "custom_id": f"bundle_approve_{approval_id}"},
+            {"type": 2, "style": 4, "label": "DECLINE", "custom_id": f"bundle_decline_{approval_id}"}
+        ]
+    }]
+
+    payload = {"embeds": [embed], "components": components}
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        return resp.status_code in [200, 201]
+    except:
+        return False
+
+
+def send_bundle_price_alert(bundle_name, bundle_price, calculated_price, bundle_variant_id, approval_id):
+    """Send alert when bundle price doesn't match sum of items"""
+    if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
+        return
+
+    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+
+    diff = bundle_price - calculated_price
+    color = 0xED4245 if bundle_price > calculated_price else 0x57F287
+
+    embed = {
+        "title": f"Bundle Price Mismatch: {bundle_name}",
+        "color": color,
+        "fields": [
+            {"name": "Current Bundle Price", "value": f"${bundle_price:.2f}", "inline": True},
+            {"name": "Items Total", "value": f"${calculated_price:.2f}", "inline": True},
+            {"name": "Difference", "value": f"${abs(diff):.2f}", "inline": True},
+        ]
+    }
+
+    components = [{
+        "type": 1,
+        "components": [
+            {"type": 2, "style": 3, "label": "UPDATE TO MATCH", "custom_id": f"bundle_update_{approval_id}"},
+            {"type": 2, "style": 2, "label": "IGNORE", "custom_id": f"bundle_ignore_{approval_id}"}
+        ]
+    }]
+
+    # Save pending for the update action
+    add_pending(approval_id, {
+        'type': 'bundle_price',
+        'name': bundle_name,
+        'variant_id': bundle_variant_id,
+        'old_price': bundle_price,
+        'new_price': calculated_price
+    })
+
+    payload = {"embeds": [embed], "components": components}
+
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except:
+        pass
+
+
+def check_bundles():
+    """Check all bundles for price mismatches"""
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return
+
+    bundles = load_json(BUNDLES_FILE)
+    if not bundles:
+        return
+
+    log("Checking bundle prices...")
+
+    try:
+        # Get all products
+        url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250"
+        headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN}
+        resp = requests.get(url, headers=headers, timeout=60)
+        if resp.status_code != 200:
+            return
+
+        all_products = resp.json().get('products', [])
+
+        for bundle_id, bundle_data in bundles.items():
+            # Find bundle product
+            bundle_product = None
+            for p in all_products:
+                if str(p['id']) == str(bundle_id):
+                    bundle_product = p
+                    break
+
+            if not bundle_product:
+                log(f"Bundle {bundle_data['name']} not found - may be deleted")
+                continue
+
+            bundle_price = float(bundle_product['variants'][0]['price'])
+            bundle_variant_id = bundle_product['variants'][0]['id']
+
+            # Calculate sum of items
+            calculated = calculate_bundle_price(bundle_data['item_ids'], all_products)
+
+            # Check if any item in bundle is missing
+            for item_id in bundle_data['item_ids']:
+                found = False
+                for p in all_products:
+                    for v in p.get('variants', []):
+                        if str(v['id']) == str(item_id):
+                            found = True
+                            break
+                    if found:
+                        break
+                if not found:
+                    log(f"Bundle item {item_id} deleted from {bundle_data['name']}")
+                    # Send alert about deleted item
+                    send_bundle_item_deleted_alert(bundle_data['name'], item_id)
+
+            # Check price mismatch (allow small tolerance)
+            if abs(bundle_price - calculated) > 0.05:
+                approval_id = f"bundle_{int(time.time())}_{hash(bundle_id) % 10000}"
+                send_bundle_price_alert(bundle_data['name'], bundle_price, calculated, bundle_variant_id, approval_id)
+                time.sleep(1)
+
+        log("Bundle check done")
+    except Exception as e:
+        log(f"Bundle check error: {e}")
+
+
+def send_bundle_item_deleted_alert(bundle_name, item_id):
+    """Alert when an item in a bundle was deleted"""
+    if not DISCORD_BOT_TOKEN or not DISCORD_BUNDLE_CHANNEL_ID:
+        return
+
+    url = f"https://discord.com/api/v10/channels/{DISCORD_BUNDLE_CHANNEL_ID}/messages"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+
+    payload = {
+        "embeds": [{
+            "title": f"Bundle Item Deleted",
+            "color": 0xED4245,
+            "description": f"An item (ID: {item_id}) in **{bundle_name}** was deleted. Please update the bundle configuration."
+        }]
+    }
+
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except:
+        pass
+
+
+def detect_new_bundles():
+    """Detect new bundle/set products that need configuration"""
+    if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        return
+
+    bundles = load_json(BUNDLES_FILE)
+    pending = load_json(PENDING_BUNDLES_FILE)
+
+    try:
+        url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250"
+        headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN}
+        resp = requests.get(url, headers=headers, timeout=60)
+        if resp.status_code != 200:
+            return
+
+        all_products = resp.json().get('products', [])
+
+        for product in all_products:
+            product_id = str(product['id'])
+
+            # Skip if already configured or pending
+            if product_id in bundles:
+                continue
+            if any(p.get('bundle_product_id') == product_id for p in pending.values()):
+                continue
+
+            # Check if it's a bundle
+            if not is_bundle_product(product['title']):
+                continue
+
+            log(f"New bundle detected: {product['title']}")
+
+            # Try to extract items from description
+            description = product.get('body_html', '')
+            item_names = extract_items_from_description(description)
+            detected_items = match_items_to_products(item_names, all_products)
+
+            approval_id = f"newbundle_{int(time.time())}_{hash(product_id) % 10000}"
+
+            add_pending_bundle(approval_id, {
+                'bundle_product_id': product_id,
+                'bundle_name': product['title'],
+                'bundle_variant_id': product['variants'][0]['id'],
+                'detected_items': [{'variant_id': i['variant_id'], 'title': i['title'], 'price': i['price']} for i in detected_items]
+            })
+
+            send_bundle_confirmation_request(product, detected_items, approval_id)
+            time.sleep(1)
+
+    except Exception as e:
+        log(f"Bundle detection error: {e}")
+
+
 def send_stock_alert(item_name):
     """Send Discord notification for out of stock item"""
     channel = DISCORD_STOCK_CHANNEL_ID or DISCORD_CHANNEL_ID
@@ -427,6 +786,36 @@ def reset():
     return jsonify({"status": "reset", "message": "Will send fresh notifications on next check"})
 
 
+@app.route('/setbundle/<bundle_id>/<item_ids>')
+def setbundle(bundle_id, item_ids):
+    """Manually set bundle items: /setbundle/123456/111,222,333"""
+    try:
+        ids = [id.strip() for id in item_ids.split(',')]
+
+        # Get bundle name from Shopify
+        url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products/{bundle_id}.json"
+        headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN}
+        resp = requests.get(url, headers=headers, timeout=30)
+
+        if resp.status_code == 200:
+            product = resp.json().get('product', {})
+            bundle_name = product.get('title', f'Bundle {bundle_id}')
+            save_bundle(bundle_id, bundle_name, ids)
+            log(f"Bundle set: {bundle_name} = {ids}")
+            return jsonify({"status": "ok", "bundle": bundle_name, "items": ids})
+        else:
+            return jsonify({"status": "error", "message": "Bundle product not found"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route('/bundles')
+def list_bundles():
+    """List all configured bundles"""
+    bundles = load_json(BUNDLES_FILE)
+    return jsonify(bundles)
+
+
 def verify_signature(req):
     """Verify Discord request signature"""
     signature = req.headers.get('X-Signature-Ed25519')
@@ -496,7 +885,183 @@ def discord_interactions():
             approval_id = custom_id.replace('decline_', '')
             return handle_decline(approval_id, data)
 
+        elif custom_id.startswith('bundle_approve_'):
+            approval_id = custom_id.replace('bundle_approve_', '')
+            return handle_bundle_approve(approval_id, data)
+
+        elif custom_id.startswith('bundle_decline_'):
+            approval_id = custom_id.replace('bundle_decline_', '')
+            return handle_bundle_decline(approval_id, data)
+
+        elif custom_id.startswith('bundle_update_'):
+            approval_id = custom_id.replace('bundle_update_', '')
+            return handle_bundle_update(approval_id, data)
+
+        elif custom_id.startswith('bundle_ignore_'):
+            approval_id = custom_id.replace('bundle_ignore_', '')
+            return handle_bundle_ignore(approval_id, data)
+
     return jsonify({"type": 4, "data": {"content": "Unknown interaction"}})
+
+
+# ============ BUNDLE INTERACTION HANDLERS ============
+
+def handle_bundle_approve(approval_id, interaction_data):
+    """Approve detected bundle items"""
+    pending = get_pending_bundle(approval_id)
+    user = interaction_data.get('member', {}).get('user', {})
+    username = user.get('username', 'Unknown')
+    message_id = interaction_data.get('message', {}).get('id')
+    channel_id = interaction_data.get('channel_id')
+
+    if not pending:
+        return jsonify({"type": 4, "data": {"content": "This bundle confirmation has expired.", "flags": 64}})
+
+    # Save the bundle configuration
+    item_ids = [item['variant_id'] for item in pending['detected_items']]
+    save_bundle(pending['bundle_product_id'], pending['bundle_name'], item_ids)
+    remove_pending_bundle(approval_id)
+
+    log(f"Bundle confirmed: {pending['bundle_name']} with {len(item_ids)} items by {username}")
+
+    # Delete original and send confirmation
+    if message_id and channel_id and DISCORD_BOT_TOKEN:
+        try:
+            delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+            headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+            requests.delete(delete_url, headers=headers, timeout=10)
+        except:
+            pass
+
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+        items_text = ", ".join([item['title'] for item in pending['detected_items']])
+        payload = {
+            "embeds": [{
+                "title": f"Bundle Confirmed: {pending['bundle_name']}",
+                "color": 0x57F287,
+                "description": f"Items: {items_text}",
+                "footer": {"text": f"Confirmed by {username}"}
+            }]
+        }
+        try:
+            requests.post(url, headers=headers, json=payload, timeout=10)
+        except:
+            pass
+
+    return jsonify({"type": 6})
+
+
+def handle_bundle_decline(approval_id, interaction_data):
+    """Decline detected items - ask for manual input"""
+    pending = get_pending_bundle(approval_id)
+    user = interaction_data.get('member', {}).get('user', {})
+    username = user.get('username', 'Unknown')
+    message_id = interaction_data.get('message', {}).get('id')
+    channel_id = interaction_data.get('channel_id')
+
+    if not pending:
+        return jsonify({"type": 4, "data": {"content": "This bundle confirmation has expired.", "flags": 64}})
+
+    # Delete original message
+    if message_id and channel_id and DISCORD_BOT_TOKEN:
+        try:
+            delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+            headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+            requests.delete(delete_url, headers=headers, timeout=10)
+        except:
+            pass
+
+        # Send message asking for variant IDs
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+        payload = {
+            "embeds": [{
+                "title": f"Enter Items for: {pending['bundle_name']}",
+                "color": 0xFEE75C,
+                "description": f"Reply with variant IDs separated by commas.\nExample: `12345, 67890, 11111`\n\nBundle ID: `{pending['bundle_product_id']}`",
+                "footer": {"text": f"Use /setbundle {pending['bundle_product_id']} id1,id2,id3"}
+            }]
+        }
+        try:
+            requests.post(url, headers=headers, json=payload, timeout=10)
+        except:
+            pass
+
+    # Keep in pending but mark as awaiting manual input
+    pending['awaiting_manual'] = True
+    add_pending_bundle(approval_id, pending)
+
+    return jsonify({"type": 6})
+
+
+def handle_bundle_update(approval_id, interaction_data):
+    """Update bundle price to match items total"""
+    pending = get_pending(approval_id)
+    user = interaction_data.get('member', {}).get('user', {})
+    username = user.get('username', 'Unknown')
+    message_id = interaction_data.get('message', {}).get('id')
+    channel_id = interaction_data.get('channel_id')
+
+    if not pending or pending.get('type') != 'bundle_price':
+        return jsonify({"type": 4, "data": {"content": "This has expired.", "flags": 64}})
+
+    # Update Shopify price
+    success = update_shopify_price(pending['variant_id'], pending['new_price'])
+
+    if success:
+        remove_pending(approval_id)
+        log(f"Bundle price updated: {pending['name']} -> ${pending['new_price']:.2f} by {username}")
+
+        # Delete and confirm
+        if message_id and channel_id and DISCORD_BOT_TOKEN:
+            try:
+                delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+                headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+                requests.delete(delete_url, headers=headers, timeout=10)
+            except:
+                pass
+
+            url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+            headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+            payload = {
+                "embeds": [{
+                    "title": f"Bundle Price Updated: {pending['name']}",
+                    "color": 0x57F287,
+                    "fields": [
+                        {"name": "Old", "value": f"${pending['old_price']:.2f}", "inline": True},
+                        {"name": "New", "value": f"${pending['new_price']:.2f}", "inline": True},
+                    ],
+                    "footer": {"text": f"Updated by {username}"}
+                }]
+            }
+            try:
+                requests.post(url, headers=headers, json=payload, timeout=10)
+            except:
+                pass
+
+    return jsonify({"type": 6})
+
+
+def handle_bundle_ignore(approval_id, interaction_data):
+    """Ignore bundle price mismatch"""
+    pending = get_pending(approval_id)
+    message_id = interaction_data.get('message', {}).get('id')
+    channel_id = interaction_data.get('channel_id')
+
+    if pending:
+        remove_pending(approval_id)
+
+    # Just delete the message
+    if message_id and channel_id and DISCORD_BOT_TOKEN:
+        try:
+            delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+            headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+            requests.delete(delete_url, headers=headers, timeout=10)
+        except:
+            pass
+
+    return jsonify({"type": 6})
 
 
 def check_permission(interaction_data):
@@ -741,6 +1306,8 @@ def price_checker_loop():
         try:
             check_prices()
             check_stock()
+            detect_new_bundles()
+            check_bundles()
         except Exception as e:
             log(f"Error in price check: {e}")
         time.sleep(CHECK_INTERVAL)
