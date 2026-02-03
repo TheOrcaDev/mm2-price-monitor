@@ -462,20 +462,40 @@ def extract_items_from_description(description):
 
     # Clean HTML tags
     clean_desc = re.sub(r'<[^>]+>', ' ', description)
-    clean_desc = clean_desc.lower()
+    clean_desc = clean_desc.lower().strip()
 
-    # Common patterns: "includes: item1, item2" or "contains item1 and item2"
-    # Or just item names listed
     items = []
 
-    # Split by common delimiters
-    parts = re.split(r'[,\n•\-\|]', clean_desc)
-    for part in parts:
-        part = part.strip()
-        # Filter out common non-item words
-        if part and len(part) > 2 and len(part) < 50:
-            if not any(skip in part for skip in ['include', 'contain', 'feature', 'this set', 'this bundle', 'product', 'item']):
+    # Pattern 1: "with X and Y" or "with X, Y and Z"
+    with_match = re.search(r'with\s+(.+)', clean_desc)
+    if with_match:
+        items_str = with_match.group(1)
+        # Split by "and" and ","
+        parts = re.split(r'\s+and\s+|,\s*', items_str)
+        for part in parts:
+            part = part.strip().rstrip('.')
+            if part and len(part) > 2 and len(part) < 50:
                 items.append(part)
+
+    # Pattern 2: "includes: X, Y, Z" or "contains X, Y, Z"
+    if not items:
+        include_match = re.search(r'(?:includes?|contains?)[:\s]+(.+)', clean_desc)
+        if include_match:
+            items_str = include_match.group(1)
+            parts = re.split(r'\s+and\s+|,\s*', items_str)
+            for part in parts:
+                part = part.strip().rstrip('.')
+                if part and len(part) > 2 and len(part) < 50:
+                    items.append(part)
+
+    # Pattern 3: Split by common delimiters as fallback
+    if not items:
+        parts = re.split(r'[,\n•\-\|]', clean_desc)
+        for part in parts:
+            part = part.strip()
+            if part and len(part) > 2 and len(part) < 50:
+                if not any(skip in part for skip in ['include', 'contain', 'feature', 'this set', 'this bundle', 'product', 'item', 'discounted', 'bundle']):
+                    items.append(part)
 
     return items[:10]  # Limit to 10 items max
 
