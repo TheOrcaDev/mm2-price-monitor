@@ -20,7 +20,8 @@ import websocket
 # Environment Variables
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")  # For buttons to work
-DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")  # Channel to send to
+DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")  # Channel for price alerts
+DISCORD_STOCK_CHANNEL_ID = os.getenv("DISCORD_STOCK_CHANNEL_ID")  # Channel for stock alerts
 DISCORD_PUBLIC_KEY = os.getenv("DISCORD_PUBLIC_KEY")  # For signature verification
 ROLE_ID = os.getenv("DISCORD_ROLE_ID", "1468305257757933853")
 ALLOWED_ROLE_IDS = os.getenv("ALLOWED_ROLE_IDS", "").split(",")  # Roles that can approve/decline
@@ -271,10 +272,11 @@ def check_stock():
 
 def send_stock_alert(item_name):
     """Send Discord notification for out of stock item"""
-    if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
+    channel = DISCORD_STOCK_CHANNEL_ID or DISCORD_CHANNEL_ID
+    if not DISCORD_BOT_TOKEN or not channel:
         return
 
-    url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
+    url = f"https://discord.com/api/v10/channels/{channel}/messages"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
 
     item_name_url = item_name.lower().replace(' ', '-').replace("'", '')
