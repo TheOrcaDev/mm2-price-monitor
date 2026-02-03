@@ -1554,16 +1554,26 @@ def check_prices():
 
 
 def price_checker_loop():
-    """Background loop for price checking"""
+    """Background loop for price checking every 10 mins"""
     time.sleep(10)  # Initial delay
     while True:
         try:
             check_prices()
-            check_stock()
             detect_new_bundles()
             check_bundles()
         except Exception as e:
             log(f"Error in price check: {e}")
+        time.sleep(CHECK_INTERVAL)
+
+
+def stock_checker_loop():
+    """Background loop for stock checking every 10 mins, offset by 5 mins"""
+    time.sleep(310)  # Initial delay + 5 min offset
+    while True:
+        try:
+            check_stock()
+        except Exception as e:
+            log(f"Error in stock check: {e}")
         time.sleep(CHECK_INTERVAL)
 
 
@@ -1623,6 +1633,55 @@ def send_bulk_confirmation(channel_id, action, count, user_id):
             "color": color,
             "description": f"{count} items {action}",
             "footer": {"text": f"By user {user_id}"}
+        }]
+    }
+
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except:
+        pass
+
+
+def send_command_confirmation(channel_id, title, message):
+    """Send confirmation for admin commands"""
+    if not DISCORD_BOT_TOKEN:
+        return
+
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+
+    payload = {
+        "embeds": [{
+            "title": title,
+            "color": 0x5865F2,
+            "description": message
+        }]
+    }
+
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except:
+        pass
+
+
+def send_help_message(channel_id):
+    """Send help message with all commands"""
+    if not DISCORD_BOT_TOKEN:
+        return
+
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+
+    payload = {
+        "embeds": [{
+            "title": "Commands",
+            "color": 0x5865F2,
+            "description": """**$approveall** - Approve all pending in this channel
+**$declineall** - Decline all pending in this channel
+**$reset** - Reset price alerts
+**$resetstock** - Reset stock alerts
+**$resetbundles** - Reset bundle detection
+**$help** - Show this message"""
         }]
     }
 
@@ -1705,6 +1764,30 @@ def discord_gateway():
                 send_bulk_confirmation(channel_id, "declined", count, author_id)
                 log(f"$declineall: {count} items declined by {author_id} in {channel_id}")
 
+            elif content == '$reset':
+                save_json(PENDING_FILE, {})
+                save_json(PRICE_FILE, {})
+                log(f"$reset: Price data cleared by {author_id}")
+                send_command_confirmation(channel_id, "Price Reset", "Price data cleared. Fresh notifications on next check.")
+
+            elif content == '$resetstock':
+                current = load_json(STOCK_FILE)
+                for key in current:
+                    current[key]['inventory'] = 1
+                save_json(STOCK_FILE, current)
+                save_json(SNOOZED_STOCK_FILE, {})
+                log(f"$resetstock: Stock data reset by {author_id}")
+                send_command_confirmation(channel_id, "Stock Reset", "Stock data reset. Fresh notifications on next check.")
+
+            elif content == '$resetbundles':
+                save_json(BUNDLES_FILE, {})
+                save_json(PENDING_BUNDLES_FILE, {})
+                log(f"$resetbundles: Bundle data cleared by {author_id}")
+                send_command_confirmation(channel_id, "Bundles Reset", "Bundle data cleared. Will re-detect on next check.")
+
+            elif content == '$help':
+                send_help_message(channel_id)
+
     def on_error(ws, error):
         log(f"Gateway error: {error}")
 
@@ -1743,6 +1826,10 @@ def startup():
     # Start price checker in background
     checker_thread = threading.Thread(target=price_checker_loop, daemon=True)
     checker_thread.start()
+
+    # Start stock checker in background (5 min offset)
+    stock_thread = threading.Thread(target=stock_checker_loop, daemon=True)
+    stock_thread.start()
 
     # Start Discord gateway for online status
     gateway_thread = threading.Thread(target=discord_gateway, daemon=True)
