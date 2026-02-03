@@ -320,7 +320,7 @@ def handle_approve(approval_id, interaction_data):
         return jsonify({
             "type": 7,  # UPDATE_MESSAGE
             "data": {
-                "content": f"**APPROVED** by <@{interaction_data.get('member', {}).get('user', {}).get('id', 'unknown')}>",
+                "content": "",
                 "embeds": [{
                     "title": f"Price Updated: {pending['name']}",
                     "color": 0x4ECB71,
@@ -357,7 +357,7 @@ def handle_decline(approval_id, interaction_data):
     return jsonify({
         "type": 7,  # UPDATE_MESSAGE
         "data": {
-            "content": f"**DECLINED** by <@{interaction_data.get('member', {}).get('user', {}).get('id', 'unknown')}>",
+            "content": "",
             "embeds": [{
                 "title": f"Declined: {pending['name']}",
                 "color": 0xFF6B6B,
