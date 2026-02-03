@@ -115,6 +115,15 @@ def get_pending(approval_id):
     return pending.get(approval_id)
 
 
+def has_pending_for_item(item_key):
+    """Check if there's already a pending approval for this item"""
+    pending = load_json(PENDING_FILE)
+    for data in pending.values():
+        if data.get('item_key') == item_key:
+            return True
+    return False
+
+
 def remove_pending(approval_id):
     pending = load_json(PENDING_FILE)
     if approval_id in pending:
@@ -620,6 +629,10 @@ def check_prices():
     for key, sp_data in current_sp.items():
         # Skip if snoozed
         if is_snoozed(key):
+            continue
+
+        # Skip if already has pending approval
+        if has_pending_for_item(key):
             continue
 
         # Find matching BuyBlox item
