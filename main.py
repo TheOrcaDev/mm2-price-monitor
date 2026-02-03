@@ -1012,6 +1012,15 @@ def list_bundles():
     return jsonify(bundles)
 
 
+@app.route('/resetbundles')
+def reset_bundles():
+    """Clear bundle data to re-detect all bundles"""
+    save_json(BUNDLES_FILE, {})
+    save_json(PENDING_BUNDLES_FILE, {})
+    log("Reset: Cleared bundles - will re-detect on next check")
+    return jsonify({"status": "reset", "message": "Will re-detect bundles on next check"})
+
+
 @app.route('/resetstock')
 def reset_stock():
     """Clear snoozed stock and mark all as in-stock to trigger fresh notifications"""
