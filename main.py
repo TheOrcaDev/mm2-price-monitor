@@ -188,13 +188,25 @@ def get_starpets_prices():
                 price = item.get('price')
                 rarity = item.get('rare', '')
                 is_chroma = item.get('chroma', False) == True or rarity == 'chroma'
+                item_type = item.get('type', 'weapon')  # weapon, pet, misc
+                item_id = item.get('id', '')
 
                 if price is None or rarity not in ['godly', 'ancient', 'vintage', 'legendary', 'chroma']:
                     continue
 
                 key = f"{name.lower()}|{'chroma' if is_chroma else 'regular'}"
                 if key not in items or float(price) < items[key]['price']:
-                    items[key] = {'name': name, 'price': float(price), 'rarity': rarity, 'is_chroma': is_chroma}
+                    # Build StarPets URL
+                    name_slug = name.lower().replace(' ', '-').replace("'", '')
+                    sp_url = f"https://starpets.gg/mm2/shop/{item_type}/{name_slug}/{item_id}"
+
+                    items[key] = {
+                        'name': name,
+                        'price': float(price),
+                        'rarity': rarity,
+                        'is_chroma': is_chroma,
+                        'sp_url': sp_url
+                    }
 
             if len(data) < 72:
                 break
@@ -699,7 +711,7 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id, change_type
     # Build product URLs
     item_name_url = bb_data['name'].lower().replace(' ', '-').replace("'", '')
     buyblox_url = f"https://buyblox.gg/products/{item_name_url}"
-    starpets_url = "https://starpets.gg/mm2"
+    starpets_url = item_data.get('sp_url', 'https://starpets.gg/mm2')
 
     embed = {
         "title": f"{title_prefix}: {bb_data['name']}",
