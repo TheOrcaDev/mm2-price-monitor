@@ -33,7 +33,7 @@ DISCORD_BUNDLE_CHANNEL_ID = os.getenv("DISCORD_BUNDLE_CHANNEL_ID", "146833887375
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "988112765489127424")  # User who can use $approveall/$declineall
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE")
 SHOPIFY_TOKEN = os.getenv("SHOPIFY_TOKEN")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "600"))  # Default 10 minutes
 UNDERCUT_PERCENT = float(os.getenv("UNDERCUT_PERCENT", "0.01"))
 PORT = int(os.getenv("PORT", "3000"))
 
@@ -364,20 +364,50 @@ def check_stock():
             else:
                 break
 
-        # Filter to MM2 products only
-        mm2_keywords = ['murder mystery 2', 'mm2', 'murder-mystery-2']
-        mm2_products = []
-        for p in all_products:
-            vendor = (p.get('vendor') or '').lower()
-            product_type = (p.get('product_type') or '').lower()
-            tags = (p.get('tags') or '').lower()
+        # Filter to MM2 products by checking collection
+        # First, get MM2 collection ID
+        mm2_collection_id = None
+        try:
+            coll_url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/custom_collections.json"
+            coll_resp = requests.get(coll_url, headers=headers, timeout=30)
+            if coll_resp.status_code == 200:
+                for coll in coll_resp.json().get('custom_collections', []):
+                    if 'mm2' in coll.get('handle', '').lower() or 'murder' in coll.get('title', '').lower():
+                        mm2_collection_id = coll['id']
+                        log(f"Found MM2 collection: {coll.get('title')} (ID: {mm2_collection_id})")
+                        break
+        except Exception as e:
+            log(f"Error getting collections: {e}")
 
-            is_mm2 = any(kw in vendor or kw in product_type or kw in tags for kw in mm2_keywords)
-            if is_mm2:
-                mm2_products.append(p)
+        # Get products from MM2 collection if found, otherwise use keyword filter
+        if mm2_collection_id:
+            try:
+                collect_url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/collects.json?collection_id={mm2_collection_id}&limit=250"
+                collect_resp = requests.get(collect_url, headers=headers, timeout=30)
+                mm2_product_ids = set()
+                if collect_resp.status_code == 200:
+                    for collect in collect_resp.json().get('collects', []):
+                        mm2_product_ids.add(collect['product_id'])
+                products = [p for p in all_products if p['id'] in mm2_product_ids]
+                log(f"Found {len(products)} MM2 products from collection")
+            except Exception as e:
+                log(f"Error getting collection products: {e}")
+                products = all_products
+        else:
+            # Fallback to keyword filter
+            mm2_keywords = ['murder mystery 2', 'mm2', 'murder-mystery-2', 'murder mystery']
+            mm2_products = []
+            for p in all_products:
+                vendor = (p.get('vendor') or '').lower()
+                product_type = (p.get('product_type') or '').lower()
+                tags = (p.get('tags') or '').lower()
+                title = (p.get('title') or '').lower()
 
-        products = mm2_products
-        log(f"Found {len(products)} MM2 products")
+                is_mm2 = any(kw in vendor or kw in product_type or kw in tags or kw in title for kw in mm2_keywords)
+                if is_mm2:
+                    mm2_products.append(p)
+            products = mm2_products
+            log(f"Found {len(products)} MM2 products (keyword filter)")
 
         for product in products:
             title = product['title']
@@ -394,10 +424,12 @@ def check_stock():
                 # Check if out of stock and state changed
                 now_out_of_stock = inventory <= 0
                 prev = previous_stock.get(key, {})
-                was_in_stock = prev.get('inventory', 0) > 0  # Default to 0 (out of stock) if unknown
+                # Default to 1 (in-stock) if no previous data, so it notifies on first check
+                was_in_stock = prev.get('inventory', 1) > 0
 
-                # Only notify if changed from in-stock to out-of-stock
+                # Notify if changed from in-stock to out-of-stock
                 if now_out_of_stock and was_in_stock and not is_stock_snoozed(variant_id):
+                    log(f"Out of stock detected: {title}")
                     out_of_stock.append({'title': title, 'variant_id': variant_id})
 
         # Save current stock
