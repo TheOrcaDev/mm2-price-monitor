@@ -505,11 +505,23 @@ def startup():
     checker_thread.start()
 
 
-# Start background tasks when module loads (works with gunicorn)
-startup()
+# Track if startup has run
+_started = False
+
+def ensure_startup():
+    global _started
+    if not _started:
+        _started = True
+        startup()
+
+# For gunicorn - start on first request
+@app.before_request
+def before_request():
+    ensure_startup()
 
 
 if __name__ == "__main__":
     # For local development
+    startup()
     log(f"Starting web server on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT)
