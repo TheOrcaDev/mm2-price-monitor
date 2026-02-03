@@ -429,16 +429,17 @@ def check_stock():
 
                 # Notify if changed from in-stock to out-of-stock
                 if now_out_of_stock and was_in_stock and not is_stock_snoozed(variant_id):
+                    image_url = product.get('images', [{}])[0].get('src', '') if product.get('images') else ''
                     log(f"Out of stock detected: {title}")
-                    out_of_stock.append({'title': title, 'variant_id': variant_id})
+                    out_of_stock.append({'title': title, 'variant_id': variant_id, 'image': image_url})
 
         # Save current stock
         save_json(STOCK_FILE, current_stock)
 
         # Send notifications for out of stock items
         if out_of_stock and DISCORD_BOT_TOKEN:
-            for item in out_of_stock[:10]:  # Limit to 10 to avoid spam
-                send_stock_alert(item['title'], item['variant_id'])
+            for item in out_of_stock:  # Send all
+                send_stock_alert(item['title'], item['variant_id'], item.get('image'))
                 time.sleep(1)
 
         log(f"Stock check done. {len(out_of_stock)} items went out of stock.")
@@ -599,8 +600,8 @@ def send_bundle_confirmation_request(bundle_product, detected_items, approval_id
     components = [{
         "type": 1,
         "components": [
-            {"type": 2, "style": 3, "label": "APPROVE", "custom_id": f"bundle_approve_{approval_id}"},
-            {"type": 2, "style": 4, "label": "DECLINE", "custom_id": f"bundle_decline_{approval_id}"}
+            {"type": 2, "style": 3, "label": "Approve", "custom_id": f"bundle_approve_{approval_id}"},
+            {"type": 2, "style": 4, "label": "Decline", "custom_id": f"bundle_decline_{approval_id}"}
         ]
     }]
 
@@ -637,8 +638,8 @@ def send_bundle_price_alert(bundle_name, bundle_price, calculated_price, bundle_
     components = [{
         "type": 1,
         "components": [
-            {"type": 2, "style": 3, "label": "UPDATE TO MATCH", "custom_id": f"bundle_update_{approval_id}"},
-            {"type": 2, "style": 2, "label": "IGNORE", "custom_id": f"bundle_ignore_{approval_id}"}
+            {"type": 2, "style": 3, "label": "Update", "custom_id": f"bundle_update_{approval_id}"},
+            {"type": 2, "style": 2, "label": "Ignore", "custom_id": f"bundle_ignore_{approval_id}"}
         ]
     }]
 
@@ -837,7 +838,7 @@ def detect_new_bundles():
         log(f"Bundle detection error: {e}")
 
 
-def send_stock_alert(item_name, variant_id):
+def send_stock_alert(item_name, variant_id, image_url=None):
     """Send Discord notification for out of stock item"""
     channel = DISCORD_STOCK_CHANNEL_ID or DISCORD_CHANNEL_ID
     if not DISCORD_BOT_TOKEN or not channel:
@@ -851,19 +852,24 @@ def send_stock_alert(item_name, variant_id):
 
     snooze_id = f"stock_snooze_{variant_id}"
 
+    embed = {
+        "title": f"Out of Stock: {item_name}",
+        "color": 0xFEE75C,  # Yellow
+        "description": f"[View on BuyBlox]({buyblox_url})"
+    }
+
+    if image_url:
+        embed["thumbnail"] = {"url": image_url}
+
     payload = {
         "content": f"<@&{DISCORD_STOCK_ROLE_ID}>" if DISCORD_STOCK_ROLE_ID else "",
-        "embeds": [{
-            "title": f"Out of Stock: {item_name}",
-            "color": 0xFEE75C,  # Yellow
-            "description": f"[View on BuyBlox]({buyblox_url})"
-        }],
+        "embeds": [embed],
         "components": [{
             "type": 1,
             "components": [{
                 "type": 2,
                 "style": 2,  # Gray
-                "label": "SNOOZE 24h",
+                "label": "Snooze",
                 "custom_id": snooze_id
             }]
         }]
@@ -918,13 +924,13 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id, change_type
             {
                 "type": 2,  # Button
                 "style": 3,  # Green
-                "label": "APPROVE",
+                "label": "Approve",
                 "custom_id": f"approve_{approval_id}"
             },
             {
                 "type": 2,  # Button
                 "style": 4,  # Red
-                "label": "DECLINE",
+                "label": "Decline",
                 "custom_id": f"decline_{approval_id}"
             }
         ]
