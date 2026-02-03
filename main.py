@@ -277,32 +277,45 @@ def home():
     return jsonify({"status": "running", "service": "MM2 Price Monitor"})
 
 
-def verify_signature(request):
+def verify_signature(req):
     """Verify Discord request signature"""
-    signature = request.headers.get('X-Signature-Ed25519')
-    timestamp = request.headers.get('X-Signature-Timestamp')
-    body = request.data.decode('utf-8')
+    signature = req.headers.get('X-Signature-Ed25519')
+    timestamp = req.headers.get('X-Signature-Timestamp')
+    body = req.data.decode('utf-8')
+
+    log(f"Verifying signature - Key set: {bool(DISCORD_PUBLIC_KEY)}, Sig: {bool(signature)}, TS: {bool(timestamp)}")
 
     if not signature or not timestamp or not DISCORD_PUBLIC_KEY:
+        log("Missing signature, timestamp, or public key")
         return False
 
     try:
         verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
         verify_key.verify(f'{timestamp}{body}'.encode(), bytes.fromhex(signature))
+        log("Signature verified OK")
         return True
-    except BadSignatureError:
+    except BadSignatureError as e:
+        log(f"Bad signature: {e}")
+        return False
+    except Exception as e:
+        log(f"Signature error: {e}")
         return False
 
 
 @app.route('/interactions', methods=['POST'])
 def discord_interactions():
     """Handle Discord button interactions"""
+    log("Received interaction request")
+
     if not verify_signature(request):
+        log("Signature verification failed")
         return 'Invalid signature', 401
 
     data = request.json
+    log(f"Interaction type: {data.get('type')}")
 
     if data.get('type') == 1:  # PING
+        log("Responding to PING")
         return jsonify({"type": 1})
 
     if data.get('type') == 3:  # MESSAGE_COMPONENT (button click)
@@ -439,6 +452,7 @@ def check_prices():
                 # Send Discord notification
                 send_approval_request(sp_data, bb_data, sp_price, approval_id)
                 changes_found += 1
+                time.sleep(1)  # Rate limit - 1 message per second
 
     log(f"Found {changes_found} items needing approval")
     save_json(PRICE_FILE, current_sp)
@@ -455,9 +469,10 @@ def price_checker_loop():
         time.sleep(CHECK_INTERVAL)
 
 
-# ============ MAIN ============
+# ============ STARTUP ============
 
-def main():
+def startup():
+    """Initialize and start background tasks"""
     log("=" * 50)
     log("MM2 PRICE MONITOR WITH APPROVAL SYSTEM")
     log("=" * 50)
@@ -472,10 +487,12 @@ def main():
     checker_thread = threading.Thread(target=price_checker_loop, daemon=True)
     checker_thread.start()
 
-    # Start Flask server for Discord interactions
-    log(f"Starting web server on port {PORT}...")
-    app.run(host='0.0.0.0', port=PORT)
+
+# Start background tasks when module loads (works with gunicorn)
+startup()
 
 
 if __name__ == "__main__":
-    main()
+    # For local development
+    log(f"Starting web server on port {PORT}...")
+    app.run(host='0.0.0.0', port=PORT)
