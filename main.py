@@ -17,7 +17,6 @@ import requests
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
 import websocket
-import redis
 
 # Environment Variables
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
@@ -27,7 +26,8 @@ DISCORD_STOCK_CHANNEL_ID = os.getenv("DISCORD_STOCK_CHANNEL_ID")  # Channel for 
 DISCORD_PUBLIC_KEY = os.getenv("DISCORD_PUBLIC_KEY")  # For signature verification
 ROLE_ID = os.getenv("DISCORD_ROLE_ID", "1468305257757933853")
 ALLOWED_ROLE_IDS = os.getenv("ALLOWED_ROLE_IDS", "").split(",")  # Roles that can approve/decline
-UPSTASH_REDIS_URL = os.getenv("UPSTASH_REDIS_URL")  # Redis for persistence
+UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")  # Upstash REST API
+UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 DISCORD_BUNDLE_CHANNEL_ID = os.getenv("DISCORD_BUNDLE_CHANNEL_ID", "1468338873754194004")  # Channel for bundle approvals
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "988112765489127424")  # User who can use $approveall/$declineall
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE")
@@ -47,16 +47,45 @@ PENDING_BUNDLES_FILE = "pending_bundles.json"  # Awaiting bundle confirmation
 
 app = Flask(__name__)
 
-# Redis connection
-redis_client = None
-if UPSTASH_REDIS_URL:
+# Upstash Redis REST API helpers
+def redis_get(key):
+    """Get value from Upstash Redis"""
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        return None
     try:
-        redis_client = redis.from_url(UPSTASH_REDIS_URL)
-        redis_client.ping()
-        print("Redis connected")
-    except Exception as e:
-        print(f"Redis connection failed: {e}")
-        redis_client = None
+        resp = requests.get(
+            f"{UPSTASH_REDIS_REST_URL}/get/{key}",
+            headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+            timeout=5
+        )
+        if resp.status_code == 200:
+            result = resp.json().get('result')
+            return result
+    except:
+        pass
+    return None
+
+
+def redis_set(key, value):
+    """Set value in Upstash Redis"""
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        return False
+    try:
+        resp = requests.post(
+            f"{UPSTASH_REDIS_REST_URL}",
+            headers={
+                "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json=["SET", key, value],
+            timeout=5
+        )
+        return resp.status_code == 200
+    except:
+        return False
+
+
+print(f"Upstash Redis: {'Configured' if UPSTASH_REDIS_REST_URL else 'Not configured'}")
 
 
 def log(msg):
@@ -85,9 +114,9 @@ def load_json(filename, default=None):
     if default is None:
         default = {}
     # Try Redis first
-    if redis_client:
+    if UPSTASH_REDIS_REST_URL:
         try:
-            data = redis_client.get(f"mm2:{filename}")
+            data = redis_get(f"mm2:{filename}")
             if data:
                 return json.loads(data)
         except:
@@ -104,9 +133,9 @@ def load_json(filename, default=None):
 
 def save_json(filename, data):
     # Save to Redis if available
-    if redis_client:
+    if UPSTASH_REDIS_REST_URL:
         try:
-            redis_client.set(f"mm2:{filename}", json.dumps(data))
+            redis_set(f"mm2:{filename}", json.dumps(data))
         except:
             pass
     # Also save to file as backup
