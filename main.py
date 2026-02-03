@@ -13,11 +13,14 @@ import threading
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import requests
+from nacl.signing import VerifyKey
+from nacl.exceptions import BadSignatureError
 
 # Environment Variables
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")  # For buttons to work
 DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")  # Channel to send to
+DISCORD_PUBLIC_KEY = os.getenv("DISCORD_PUBLIC_KEY")  # For signature verification
 ROLE_ID = os.getenv("DISCORD_ROLE_ID", "1468305257757933853")
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE")
 SHOPIFY_TOKEN = os.getenv("SHOPIFY_TOKEN")
@@ -197,10 +200,8 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id):
     new_price = round(sp_price * (1 - UNDERCUT_PERCENT), 2)
     price_diff = bb_data['price'] - sp_price
 
-    chroma_tag = " [CHROMA]" if item_data.get('is_chroma') else ""
-
     embed = {
-        "title": f"Price Change: {bb_data['name']}{chroma_tag}",
+        "title": f"Price Change: {bb_data['name']}",
         "color": 0xFF6B6B if price_diff > 0 else 0x4ECB71,  # Red if SP cheaper, green if BB cheaper
         "fields": [
             {"name": "BuyBlox Price", "value": f"**${bb_data['price']:.2f}**", "inline": True},
@@ -276,12 +277,31 @@ def home():
     return jsonify({"status": "running", "service": "MM2 Price Monitor"})
 
 
+def verify_signature(request):
+    """Verify Discord request signature"""
+    signature = request.headers.get('X-Signature-Ed25519')
+    timestamp = request.headers.get('X-Signature-Timestamp')
+    body = request.data.decode('utf-8')
+
+    if not signature or not timestamp or not DISCORD_PUBLIC_KEY:
+        return False
+
+    try:
+        verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
+        verify_key.verify(f'{timestamp}{body}'.encode(), bytes.fromhex(signature))
+        return True
+    except BadSignatureError:
+        return False
+
+
 @app.route('/interactions', methods=['POST'])
 def discord_interactions():
     """Handle Discord button interactions"""
+    if not verify_signature(request):
+        return 'Invalid signature', 401
+
     data = request.json
 
-    # Verify interaction (in production, verify signature)
     if data.get('type') == 1:  # PING
         return jsonify({"type": 1})
 
