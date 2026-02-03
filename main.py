@@ -404,6 +404,15 @@ def home():
     return jsonify({"status": "running", "service": "MM2 Price Monitor"})
 
 
+@app.route('/reset')
+def reset():
+    """Clear pending approvals and saved prices to trigger fresh notifications"""
+    save_json(PENDING_FILE, {})
+    save_json(PRICE_FILE, {})
+    log("Reset: Cleared pending approvals and saved prices")
+    return jsonify({"status": "reset", "message": "Will send fresh notifications on next check"})
+
+
 def verify_signature(req):
     """Verify Discord request signature"""
     signature = req.headers.get('X-Signature-Ed25519')
