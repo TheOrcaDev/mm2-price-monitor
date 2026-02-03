@@ -29,6 +29,7 @@ ROLE_ID = os.getenv("DISCORD_ROLE_ID", "1468305257757933853")
 ALLOWED_ROLE_IDS = os.getenv("ALLOWED_ROLE_IDS", "").split(",")  # Roles that can approve/decline
 UPSTASH_REDIS_URL = os.getenv("UPSTASH_REDIS_URL")  # Redis for persistence
 DISCORD_BUNDLE_CHANNEL_ID = os.getenv("DISCORD_BUNDLE_CHANNEL_ID", "1468338873754194004")  # Channel for bundle approvals
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "988112765489127424")  # User who can use $approveall/$declineall
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE")
 SHOPIFY_TOKEN = os.getenv("SHOPIFY_TOKEN")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
@@ -1267,7 +1268,8 @@ def check_prices():
                     'old_price': bb_price,
                     'new_price': new_price,
                     'sp_price': sp_price,
-                    'is_chroma': sp_data.get('is_chroma', False)
+                    'is_chroma': sp_data.get('is_chroma', False),
+                    'channel_id': DISCORD_CHANNEL_ID
                 })
 
                 # Send Discord notification (red - lower price)
@@ -1299,7 +1301,8 @@ def check_prices():
                     'old_price': bb_price,
                     'new_price': new_price,
                     'sp_price': sp_price,
-                    'is_chroma': sp_data.get('is_chroma', False)
+                    'is_chroma': sp_data.get('is_chroma', False),
+                    'channel_id': DISCORD_CHANNEL_ID
                 })
 
                 # Send Discord notification (green - raise price)
@@ -1327,6 +1330,69 @@ def price_checker_loop():
 
 # ============ DISCORD GATEWAY (for online status) ============
 
+def approve_all_in_channel(channel_id, user_id):
+    """Approve all pending items in a channel"""
+    pending = load_json(PENDING_FILE)
+    approved = 0
+
+    for approval_id, data in list(pending.items()):
+        if data.get('channel_id') == channel_id:
+            # Update Shopify price
+            success = update_shopify_price(data['variant_id'], data['new_price'])
+            if success:
+                log_action("APPROVE", data['name'], f"user:{user_id}", data['old_price'], data['new_price'])
+                approved += 1
+
+    # Clear all pending for this channel
+    pending = {k: v for k, v in pending.items() if v.get('channel_id') != channel_id}
+    save_json(PENDING_FILE, pending)
+
+    return approved
+
+
+def decline_all_in_channel(channel_id, user_id):
+    """Decline all pending items in a channel"""
+    pending = load_json(PENDING_FILE)
+    declined = 0
+
+    for approval_id, data in list(pending.items()):
+        if data.get('channel_id') == channel_id:
+            snooze_item(data['item_key'], hours=24)
+            log_action("DECLINE", data['name'], f"user:{user_id}")
+            declined += 1
+
+    # Clear all pending for this channel
+    pending = {k: v for k, v in pending.items() if v.get('channel_id') != channel_id}
+    save_json(PENDING_FILE, pending)
+
+    return declined
+
+
+def send_bulk_confirmation(channel_id, action, count, user_id):
+    """Send confirmation message for bulk action"""
+    if not DISCORD_BOT_TOKEN:
+        return
+
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}", "Content-Type": "application/json"}
+
+    color = 0x57F287 if action == "approved" else 0xED4245
+
+    payload = {
+        "embeds": [{
+            "title": f"Bulk {action.title()}",
+            "color": color,
+            "description": f"{count} items {action}",
+            "footer": {"text": f"By user {user_id}"}
+        }]
+    }
+
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except:
+        pass
+
+
 def discord_gateway():
     """Connect to Discord gateway to show bot as online"""
     if not DISCORD_BOT_TOKEN:
@@ -1340,17 +1406,19 @@ def discord_gateway():
         nonlocal heartbeat_interval
         data = json.loads(message)
         op = data.get('op')
+        t = data.get('t')  # Event type
 
         if op == 10:  # HELLO
             heartbeat_interval = data['d']['heartbeat_interval']
             log(f"Gateway connected, heartbeat: {heartbeat_interval}ms")
 
-            # Send IDENTIFY
+            # Send IDENTIFY with intents for messages
+            # GUILDS (1) + GUILD_MESSAGES (512) + MESSAGE_CONTENT (32768) = 33281
             identify = {
                 "op": 2,
                 "d": {
                     "token": DISCORD_BOT_TOKEN,
-                    "intents": 0,
+                    "intents": 33281,
                     "properties": {
                         "os": "linux",
                         "browser": "mm2-monitor",
@@ -1376,6 +1444,27 @@ def discord_gateway():
 
         elif op == 11:  # HEARTBEAT ACK
             pass  # All good
+
+        elif op == 0 and t == 'MESSAGE_CREATE':
+            # Handle messages for $approveall and $declineall
+            msg_data = data.get('d', {})
+            content = msg_data.get('content', '').strip().lower()
+            author_id = msg_data.get('author', {}).get('id', '')
+            channel_id = msg_data.get('channel_id', '')
+
+            # Only allow admin user
+            if author_id != ADMIN_USER_ID:
+                return
+
+            if content == '$approveall':
+                count = approve_all_in_channel(channel_id, author_id)
+                send_bulk_confirmation(channel_id, "approved", count, author_id)
+                log(f"$approveall: {count} items approved by {author_id} in {channel_id}")
+
+            elif content == '$declineall':
+                count = decline_all_in_channel(channel_id, author_id)
+                send_bulk_confirmation(channel_id, "declined", count, author_id)
+                log(f"$declineall: {count} items declined by {author_id} in {channel_id}")
 
     def on_error(ws, error):
         log(f"Gateway error: {error}")
