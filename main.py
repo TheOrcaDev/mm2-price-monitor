@@ -23,6 +23,8 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")  # For buttons to work
 DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")  # Channel to send to
 DISCORD_PUBLIC_KEY = os.getenv("DISCORD_PUBLIC_KEY")  # For signature verification
 ROLE_ID = os.getenv("DISCORD_ROLE_ID", "1468305257757933853")
+ALLOWED_ROLE_IDS = os.getenv("ALLOWED_ROLE_IDS", "").split(",")  # Roles that can approve/decline
+MIN_PRICE = float(os.getenv("MIN_PRICE", "0.50"))  # Minimum price to set
 SHOPIFY_STORE = os.getenv("SHOPIFY_STORE")
 SHOPIFY_TOKEN = os.getenv("SHOPIFY_TOKEN")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))
@@ -33,12 +35,29 @@ PORT = int(os.getenv("PORT", "3000"))
 PRICE_FILE = "starpets_prices.json"
 SNOOZED_FILE = "snoozed_items.json"
 PENDING_FILE = "pending_approvals.json"
+ACTION_LOG_FILE = "actions.log"
 
 app = Flask(__name__)
 
 
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+
+def log_action(action, item_name, username, old_price=None, new_price=None):
+    """Log approve/decline actions to file"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if action == "APPROVE":
+        entry = f"[{timestamp}] APPROVED: {item_name} | ${old_price:.2f} -> ${new_price:.2f} | by {username}\n"
+    else:
+        entry = f"[{timestamp}] DECLINED: {item_name} | by {username}\n"
+
+    try:
+        with open(ACTION_LOG_FILE, 'a') as f:
+            f.write(entry)
+    except:
+        pass
+    log(entry.strip())
 
 
 # ============ FILE HELPERS ============
@@ -195,11 +214,19 @@ def update_shopify_price(variant_id, new_price):
 
 # ============ DISCORD ============
 
-def send_approval_request(item_data, bb_data, sp_price, approval_id):
-    """Send Discord embed with approve/decline buttons"""
+def send_approval_request(item_data, bb_data, sp_price, approval_id, change_type="lower"):
+    """Send Discord embed with approve/decline buttons
+    change_type: 'lower' = SP cheaper, suggest lowering | 'higher' = SP more expensive, suggest raising
+    """
 
-    new_price = round(sp_price * (1 - UNDERCUT_PERCENT), 2)
-    price_diff = bb_data['price'] - sp_price
+    if change_type == "lower":
+        new_price = round(sp_price * (1 - UNDERCUT_PERCENT), 2)
+        color = 0xED4245  # Red - need to lower price
+        title_prefix = "Lower Price"
+    else:
+        new_price = round(sp_price * (1 - UNDERCUT_PERCENT), 2)  # Match StarPets -1%
+        color = 0x57F287  # Green - can raise price
+        title_prefix = "Raise Price"
 
     # Build product URLs
     item_name_url = bb_data['name'].lower().replace(' ', '-').replace("'", '')
@@ -207,8 +234,8 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id):
     starpets_url = "https://starpets.gg/mm2"
 
     embed = {
-        "title": bb_data['name'],
-        "color": 0x5865F2,
+        "title": f"{title_prefix}: {bb_data['name']}",
+        "color": color,
         "fields": [
             {"name": "BuyBlox", "value": f"${bb_data['price']:.2f}", "inline": True},
             {"name": "StarPets", "value": f"${sp_price:.2f}", "inline": True},
@@ -354,8 +381,31 @@ def discord_interactions():
     return jsonify({"type": 4, "data": {"content": "Unknown interaction"}})
 
 
+def check_permission(interaction_data):
+    """Check if user has permission to approve/decline"""
+    member = interaction_data.get('member', {})
+    roles = member.get('roles', [])
+
+    # If no allowed roles configured, allow everyone
+    if not ALLOWED_ROLE_IDS or ALLOWED_ROLE_IDS == ['']:
+        return True
+
+    # Check if user has any allowed role
+    for role_id in roles:
+        if role_id in ALLOWED_ROLE_IDS:
+            return True
+    return False
+
+
 def handle_approve(approval_id, interaction_data):
     """Handle approve button click"""
+    # Check permission
+    if not check_permission(interaction_data):
+        return jsonify({
+            "type": 4,
+            "data": {"content": "You don't have permission to approve prices.", "flags": 64}
+        })
+
     pending = get_pending(approval_id)
     user = interaction_data.get('member', {}).get('user', {})
     username = user.get('username', 'Unknown')
@@ -368,12 +418,19 @@ def handle_approve(approval_id, interaction_data):
             "data": {"content": "This approval has expired or was already handled.", "flags": 64}
         })
 
+    # Check minimum price
+    if pending['new_price'] < MIN_PRICE:
+        return jsonify({
+            "type": 4,
+            "data": {"content": f"Price ${pending['new_price']:.2f} is below minimum (${MIN_PRICE:.2f}). Declined.", "flags": 64}
+        })
+
     # Update Shopify price
     success = update_shopify_price(pending['variant_id'], pending['new_price'])
 
     if success:
         remove_pending(approval_id)
-        log(f"APPROVED: {pending['name']} -> ${pending['new_price']:.2f}")
+        log_action("APPROVE", pending['name'], username, pending['old_price'], pending['new_price'])
 
         # Delete original message
         if message_id and channel_id and DISCORD_BOT_TOKEN:
@@ -414,6 +471,13 @@ def handle_approve(approval_id, interaction_data):
 
 def handle_decline(approval_id, interaction_data):
     """Handle decline button click"""
+    # Check permission
+    if not check_permission(interaction_data):
+        return jsonify({
+            "type": 4,
+            "data": {"content": "You don't have permission to decline prices.", "flags": 64}
+        })
+
     pending = get_pending(approval_id)
     user = interaction_data.get('member', {}).get('user', {})
     username = user.get('username', 'Unknown')
@@ -429,7 +493,7 @@ def handle_decline(approval_id, interaction_data):
     # Snooze item for 24 hours
     snooze_item(pending['item_key'], hours=24)
     remove_pending(approval_id)
-    log(f"DECLINED: {pending['name']} - snoozed 24h")
+    log_action("DECLINE", pending['name'], username)
 
     # Delete original message
     if message_id and channel_id and DISCORD_BOT_TOKEN:
@@ -514,8 +578,40 @@ def check_prices():
                     'is_chroma': sp_data.get('is_chroma', False)
                 })
 
-                # Send Discord notification
-                send_approval_request(sp_data, bb_data, sp_price, approval_id)
+                # Send Discord notification (red - lower price)
+                send_approval_request(sp_data, bb_data, sp_price, approval_id, "lower")
+                changes_found += 1
+                time.sleep(1)  # Rate limit - 1 message per second
+
+        # Check if StarPets is 15%+ higher (we can raise our price)
+        elif sp_price > bb_price * 1.15:
+            # Skip if price difference is too big (likely wrong match)
+            price_diff_percent = (sp_price - bb_price) / bb_price
+            if price_diff_percent > 1.0:  # More than 100% higher is suspicious
+                log(f"Skipping {bb_data['name']}: {price_diff_percent*100:.0f}% higher (likely wrong match)")
+                continue
+
+            new_price = round(sp_price * (1 - UNDERCUT_PERCENT), 2)
+
+            # Only notify if this is a significant change or new
+            old_sp_price = saved_prices.get(key, {}).get('price', 0)
+            if abs(sp_price - old_sp_price) > 0.01 or key not in saved_prices:
+
+                approval_id = f"{int(time.time())}_{hash(key) % 10000}"
+
+                # Save pending approval
+                add_pending(approval_id, {
+                    'item_key': key,
+                    'name': bb_data['name'],
+                    'variant_id': bb_data['variant_id'],
+                    'old_price': bb_price,
+                    'new_price': new_price,
+                    'sp_price': sp_price,
+                    'is_chroma': sp_data.get('is_chroma', False)
+                })
+
+                # Send Discord notification (green - raise price)
+                send_approval_request(sp_data, bb_data, sp_price, approval_id, "higher")
                 changes_found += 1
                 time.sleep(1)  # Rate limit - 1 message per second
 
