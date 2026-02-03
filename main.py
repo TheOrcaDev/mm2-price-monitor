@@ -1697,6 +1697,8 @@ def send_help_message(channel_id):
         pass
 
 
+_processed_messages = set()  # Track processed message IDs to avoid duplicates
+
 def discord_gateway():
     """Connect to Discord gateway to show bot as online"""
     if not DISCORD_BOT_TOKEN:
@@ -1752,6 +1754,16 @@ def discord_gateway():
         elif op == 0 and t == 'MESSAGE_CREATE':
             # Handle messages for $approveall and $declineall
             msg_data = data.get('d', {})
+            msg_id = msg_data.get('id', '')
+
+            # Deduplicate messages
+            if msg_id in _processed_messages:
+                return
+            _processed_messages.add(msg_id)
+            # Keep set small
+            if len(_processed_messages) > 100:
+                _processed_messages.clear()
+
             content = msg_data.get('content', '').strip().lower()
             author_id = msg_data.get('author', {}).get('id', '')
             channel_id = msg_data.get('channel_id', '')
@@ -1842,8 +1854,11 @@ def startup():
     gateway_thread.start()
 
 
-# Auto-start on module load
-startup()
+# Auto-start on module load (only once)
+_started = False
+if not _started:
+    _started = True
+    startup()
 
 
 if __name__ == "__main__":
