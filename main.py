@@ -15,6 +15,7 @@ from flask import Flask, request, jsonify
 import requests
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
+import websocket
 
 # Environment Variables
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
@@ -486,6 +487,82 @@ def price_checker_loop():
         time.sleep(CHECK_INTERVAL)
 
 
+# ============ DISCORD GATEWAY (for online status) ============
+
+def discord_gateway():
+    """Connect to Discord gateway to show bot as online"""
+    if not DISCORD_BOT_TOKEN:
+        log("No bot token, skipping gateway connection")
+        return
+
+    gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
+    heartbeat_interval = 41250  # Default, updated from HELLO
+
+    def on_message(ws, message):
+        nonlocal heartbeat_interval
+        data = json.loads(message)
+        op = data.get('op')
+
+        if op == 10:  # HELLO
+            heartbeat_interval = data['d']['heartbeat_interval']
+            log(f"Gateway connected, heartbeat: {heartbeat_interval}ms")
+
+            # Send IDENTIFY
+            identify = {
+                "op": 2,
+                "d": {
+                    "token": DISCORD_BOT_TOKEN,
+                    "intents": 0,
+                    "properties": {
+                        "os": "linux",
+                        "browser": "mm2-monitor",
+                        "device": "mm2-monitor"
+                    },
+                    "presence": {
+                        "status": "online",
+                        "activities": [{
+                            "name": "MM2 Prices",
+                            "type": 3  # Watching
+                        }]
+                    }
+                }
+            }
+            ws.send(json.dumps(identify))
+
+            # Start heartbeat thread
+            def heartbeat():
+                while True:
+                    time.sleep(heartbeat_interval / 1000)
+                    try:
+                        ws.send(json.dumps({"op": 1, "d": None}))
+                    except:
+                        break
+            threading.Thread(target=heartbeat, daemon=True).start()
+
+        elif op == 11:  # HEARTBEAT ACK
+            pass  # All good
+
+    def on_error(ws, error):
+        log(f"Gateway error: {error}")
+
+    def on_close(ws, close_status, close_msg):
+        log(f"Gateway closed: {close_status} {close_msg}")
+        time.sleep(5)
+        discord_gateway()  # Reconnect
+
+    def on_open(ws):
+        log("Gateway connection opened")
+
+    ws = websocket.WebSocketApp(
+        gateway_url,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_open=on_open
+    )
+    ws.run_forever()
+
+
 # ============ STARTUP ============
 
 def startup():
@@ -503,6 +580,10 @@ def startup():
     # Start price checker in background
     checker_thread = threading.Thread(target=price_checker_loop, daemon=True)
     checker_thread.start()
+
+    # Start Discord gateway for online status
+    gateway_thread = threading.Thread(target=discord_gateway, daemon=True)
+    gateway_thread.start()
 
 
 # Track if startup has run
