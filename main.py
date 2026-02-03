@@ -234,7 +234,7 @@ def check_stock():
 
     try:
         # Get all products with inventory
-        url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250&fields=id,title,variants"
+        url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250&fields=id,title,variants,vendor,product_type,tags"
         headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN}
 
         resp = requests.get(url, headers=headers, timeout=60)
@@ -243,6 +243,21 @@ def check_stock():
             return
 
         products = resp.json().get('products', [])
+
+        # Filter to MM2 products only
+        mm2_keywords = ['murder mystery 2', 'mm2', 'murder-mystery-2']
+        mm2_products = []
+        for p in products:
+            vendor = (p.get('vendor') or '').lower()
+            product_type = (p.get('product_type') or '').lower()
+            tags = (p.get('tags') or '').lower()
+
+            is_mm2 = any(kw in vendor or kw in product_type or kw in tags for kw in mm2_keywords)
+            if is_mm2:
+                mm2_products.append(p)
+
+        products = mm2_products
+        log(f"Found {len(products)} MM2 products")
 
         for product in products:
             title = product['title']
@@ -295,8 +310,7 @@ def send_stock_alert(item_name):
         "embeds": [{
             "title": f"Out of Stock: {item_name}",
             "color": 0xFEE75C,  # Yellow
-            "description": f"[View on BuyBlox]({buyblox_url})",
-            "footer": {"text": "Stock Alert"}
+            "description": f"[View on BuyBlox]({buyblox_url})"
         }]
     }
 
