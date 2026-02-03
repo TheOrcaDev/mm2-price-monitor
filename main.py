@@ -307,9 +307,26 @@ def discord_interactions():
     """Handle Discord button interactions"""
     log("Received interaction request")
 
-    if not verify_signature(request):
-        log("Signature verification failed")
-        return 'Invalid signature', 401
+    # Get raw body for signature verification
+    raw_body = request.data
+
+    # Verify signature
+    signature = request.headers.get('X-Signature-Ed25519')
+    timestamp = request.headers.get('X-Signature-Timestamp')
+
+    log(f"Sig: {signature[:20] if signature else 'None'}... TS: {timestamp}")
+
+    if DISCORD_PUBLIC_KEY and signature and timestamp:
+        try:
+            verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
+            verify_key.verify(f'{timestamp}{raw_body.decode("utf-8")}'.encode(), bytes.fromhex(signature))
+            log("Signature OK")
+        except Exception as e:
+            log(f"Sig verify failed: {e}")
+            return 'Invalid signature', 401
+    else:
+        log(f"Missing: key={bool(DISCORD_PUBLIC_KEY)} sig={bool(signature)} ts={bool(timestamp)}")
+        return 'Missing signature data', 401
 
     data = request.json
     log(f"Interaction type: {data.get('type')}")
