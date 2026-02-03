@@ -460,42 +460,48 @@ def extract_items_from_description(description):
     if not description:
         return []
 
-    # Clean HTML tags
-    clean_desc = re.sub(r'<[^>]+>', ' ', description)
-    clean_desc = clean_desc.lower().strip()
+    # Clean HTML tags but preserve newlines
+    clean_desc = re.sub(r'<br\s*/?>', '\n', description)
+    clean_desc = re.sub(r'<[^>]+>', ' ', clean_desc)
+    clean_desc = clean_desc.strip()
 
     items = []
 
-    # Pattern 1: "with X and Y" or "with X, Y and Z"
-    with_match = re.search(r'with\s+(.+)', clean_desc)
-    if with_match:
-        items_str = with_match.group(1)
-        # Split by "and" and ","
-        parts = re.split(r'\s+and\s+|,\s*', items_str)
-        for part in parts:
-            part = part.strip().rstrip('.')
-            if part and len(part) > 2 and len(part) < 50:
-                items.append(part)
+    # Pattern 1: "Includes:" followed by newline-separated items like "Amerilaser (Gun)"
+    include_match = re.search(r'includes?[:\s]*\n(.+?)(?:\n\n|why|$)', clean_desc, re.IGNORECASE | re.DOTALL)
+    if include_match:
+        items_section = include_match.group(1)
+        lines = items_section.strip().split('\n')
+        for line in lines:
+            line = line.strip()
+            # Remove type info like "(Gun)", "(Knife)", "(Pet)"
+            item_name = re.sub(r'\s*\([^)]+\)\s*$', '', line).strip()
+            if item_name and len(item_name) > 1 and len(item_name) < 50:
+                items.append(item_name.lower())
 
-    # Pattern 2: "includes: X, Y, Z" or "contains X, Y, Z"
+    # Pattern 2: "with X and Y" or "with X, Y and Z"
     if not items:
-        include_match = re.search(r'(?:includes?|contains?)[:\s]+(.+)', clean_desc)
+        with_match = re.search(r'with\s+(.+?)(?:\.|$)', clean_desc, re.IGNORECASE)
+        if with_match:
+            items_str = with_match.group(1)
+            parts = re.split(r'\s+and\s+|,\s*', items_str)
+            for part in parts:
+                part = part.strip().rstrip('.')
+                if part and len(part) > 2 and len(part) < 50:
+                    items.append(part.lower())
+
+    # Pattern 3: "includes X, Y and Z" (inline)
+    if not items:
+        include_match = re.search(r'includes?\s+([^.]+)', clean_desc, re.IGNORECASE)
         if include_match:
             items_str = include_match.group(1)
             parts = re.split(r'\s+and\s+|,\s*', items_str)
             for part in parts:
                 part = part.strip().rstrip('.')
+                # Remove type info
+                part = re.sub(r'\s*\([^)]+\)\s*$', '', part).strip()
                 if part and len(part) > 2 and len(part) < 50:
-                    items.append(part)
-
-    # Pattern 3: Split by common delimiters as fallback
-    if not items:
-        parts = re.split(r'[,\n•\-\|]', clean_desc)
-        for part in parts:
-            part = part.strip()
-            if part and len(part) > 2 and len(part) < 50:
-                if not any(skip in part for skip in ['include', 'contain', 'feature', 'this set', 'this bundle', 'product', 'item', 'discounted', 'bundle']):
-                    items.append(part)
+                    items.append(part.lower())
 
     return items[:10]  # Limit to 10 items max
 
