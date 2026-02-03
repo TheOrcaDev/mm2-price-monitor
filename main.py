@@ -207,7 +207,7 @@ def send_approval_request(item_data, bb_data, sp_price, approval_id):
             {"name": "BuyBlox Price", "value": f"**${bb_data['price']:.2f}**", "inline": True},
             {"name": "StarPets Price", "value": f"**${sp_price:.2f}**", "inline": True},
             {"name": "Difference", "value": f"${abs(price_diff):.2f}", "inline": True},
-            {"name": "New Price if Approved", "value": f"**${new_price:.2f}** ({UNDERCUT_PERCENT*100:.0f}% under SP)", "inline": False},
+            {"name": "New Price if Approved", "value": f"**${new_price:.2f}**", "inline": False},
         ],
         "footer": {"text": f"ID: {approval_id}"}
     }
