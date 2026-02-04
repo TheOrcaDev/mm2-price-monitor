@@ -421,16 +421,13 @@ def check_stock():
                     'inventory': inventory
                 }
 
-                # Check if out of stock and state changed
+                # Check if out of stock
                 now_out_of_stock = inventory <= 0
-                prev = previous_stock.get(key, {})
-                # Default to 1 (in-stock) if no previous data, so it notifies on first check
-                was_in_stock = prev.get('inventory', 1) > 0
 
-                # Notify if changed from in-stock to out-of-stock
-                if now_out_of_stock and was_in_stock and not is_stock_snoozed(variant_id):
+                # Notify for any item that is out of stock (not snoozed)
+                if now_out_of_stock and not is_stock_snoozed(variant_id):
                     image_url = product.get('images', [{}])[0].get('src', '') if product.get('images') else ''
-                    log(f"Out of stock detected: {title}")
+                    log(f"Out of stock: {title}")
                     out_of_stock.append({'title': title, 'variant_id': variant_id, 'image': image_url})
 
         # Save current stock
@@ -778,15 +775,20 @@ def get_mm2_product_ids():
 
 def detect_new_bundles():
     """Detect new bundle/set products that need configuration"""
+    log("Checking for new bundles...")
+
     if not SHOPIFY_STORE or not SHOPIFY_TOKEN:
+        log("No Shopify credentials for bundle detection")
         return
 
     bundles = load_json(BUNDLES_FILE)
     pending = load_json(PENDING_BUNDLES_FILE)
+    log(f"Known bundles: {len(bundles)}, Pending: {len(pending)}")
 
     try:
         # Get MM2 product IDs first
         mm2_product_ids = get_mm2_product_ids()
+        log(f"MM2 product IDs found: {len(mm2_product_ids)}")
         if not mm2_product_ids:
             log("No MM2 collection found for bundle detection")
             return
@@ -801,6 +803,11 @@ def detect_new_bundles():
 
         # Filter to MM2 products only
         all_products = [p for p in all_products if p['id'] in mm2_product_ids]
+        log(f"MM2 products to check: {len(all_products)}")
+
+        # Find bundles/sets
+        bundle_products = [p for p in all_products if is_bundle_product(p['title'])]
+        log(f"Bundle/Set products found: {len(bundle_products)}")
 
         for product in all_products:
             product_id = str(product['id'])
