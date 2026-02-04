@@ -1349,10 +1349,15 @@ def handle_approve(approval_id, interaction_data):
     channel_id = interaction_data.get('channel_id')
 
     if not pending:
-        return jsonify({
-            "type": 4,
-            "data": {"content": "This approval has expired or was already handled.", "flags": 64}
-        })
+        # Still delete the message even if expired
+        if message_id and channel_id and DISCORD_BOT_TOKEN:
+            try:
+                delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+                headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+                requests.delete(delete_url, headers=headers, timeout=10)
+            except:
+                pass
+        return jsonify({"type": 6})
 
     # Update Shopify price
     success = update_shopify_price(pending['variant_id'], pending['new_price'])
@@ -1414,10 +1419,15 @@ def handle_decline(approval_id, interaction_data):
     channel_id = interaction_data.get('channel_id')
 
     if not pending:
-        return jsonify({
-            "type": 4,
-            "data": {"content": "This approval has expired or was already handled.", "flags": 64}
-        })
+        # Still delete the message even if expired
+        if message_id and channel_id and DISCORD_BOT_TOKEN:
+            try:
+                delete_url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+                headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+                requests.delete(delete_url, headers=headers, timeout=10)
+            except:
+                pass
+        return jsonify({"type": 6})
 
     # Snooze item for 24 hours
     snooze_item(pending['item_key'], hours=24)
